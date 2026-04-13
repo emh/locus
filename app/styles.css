@@ -651,3 +651,17 @@ header h1 {
     min-height: 160px;
   }
 }
+
+@media (max-width: 699px) {
+  #map-container {
+    height: calc(38dvh + env(safe-area-inset-top, 0px));
+    max-height: calc(380px + env(safe-area-inset-top, 0px));
+    margin-top: calc(-1 * env(safe-area-inset-top, 0px));
+  }
+}
+
+@media (max-width: 699px) and (max-height: 600px) {
+  #map-container {
+    height: calc(30dvh + env(safe-area-inset-top, 0px));
+  }
+}
