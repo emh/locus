@@ -2,6 +2,7 @@ const MAX_PAGE_BYTES = 2_000_000;
 const MAX_TEXT_CHARS = 40_000;
 const MAX_STRUCTURED_CHARS = 20_000;
 
+
 export default {
   async fetch(request, env) {
     const cors = corsHeaders(request, env);

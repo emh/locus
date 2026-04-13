@@ -2,6 +2,7 @@ const DEFAULT_ENDPOINT = "https://nominatim.openstreetmap.org";
 const DEFAULT_USER_AGENT = "LocusPersonalApp/0.1";
 const CACHE_MAX_AGE = 60 * 60 * 24 * 30;
 
+
 export default {
   async fetch(request, env) {
     try {

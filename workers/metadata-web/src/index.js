@@ -13,6 +13,7 @@ const PLACE_TYPES = [
   "Other"
 ];
 
+
 const TYPE_MATCHERS = [
   ["Restaurant", /\b(restaurant|diner|bistro|trattoria|pizzeria|sushi|ramen|taqueria|brasserie|izakaya)\b/i],
   ["Bar", /\b(bar|pub|cocktail|brewery|taproom|wine)\b/i],

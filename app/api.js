@@ -1,6 +1,7 @@
 import { loadSettings } from "./storage.js";
 import { normalizePlace } from "./place.js";
 
+
 const PLACE_PATH = "/api/places";
 const GEOCODE_PATH = "/api/geocode";
 
