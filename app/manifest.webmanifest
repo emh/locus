@@ -1,0 +1,10 @@
+{
+  "name": "Locus",
+  "short_name": "Locus",
+  "id": "./",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#fffff8",
+  "theme_color": "#fffff8"
+}

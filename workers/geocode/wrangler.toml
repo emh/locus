@@ -1,0 +1,8 @@
+name = "locus-geocode"
+main = "src/index.js"
+compatibility_date = "2026-04-01"
+workers_dev = true
+
+[vars]
+NOMINATIM_ENDPOINT = "https://nominatim.openstreetmap.org"
+NOMINATIM_USER_AGENT = "LocusPersonalApp/0.1"

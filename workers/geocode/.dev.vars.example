@@ -1,0 +1,2 @@
+NOMINATIM_ENDPOINT="https://nominatim.openstreetmap.org"
+NOMINATIM_USER_AGENT="LocusPersonalApp/0.1"

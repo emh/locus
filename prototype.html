@@ -1,0 +1,1390 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#FFFFF8">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<title>Locus</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Crimson+Pro:ital,wght@0,300;0,400;0,500;0,600;1,300;1,400&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+:root {
+  --paper: #FFFFF8;
+  --ink: #111;
+  --ink-mid: #555;
+  --ink-light: #999;
+  --ink-faint: #ccc;
+  --red: #8B0000;
+  --red-light: #a52a2a;
+  --rule: #e0dcd6;
+  --hover: rgba(0,0,0,0.02);
+  --font: 'Crimson Pro', 'Palatino Linotype', Palatino, Georgia, serif;
+  --mono: 'SF Mono', 'Menlo', 'Consolas', 'Liberation Mono', monospace;
+  --ease: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+*, *::before, *::after {
+  margin: 0; padding: 0; box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  font-family: var(--font);
+  font-size: 17px;
+  line-height: 1.6;
+  color: var(--ink);
+  background: var(--paper);
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+}
+
+body.no-scroll { overflow: hidden; }
+
+/* ─── Map ─── */
+
+#map-container {
+  position: relative;
+  flex: 0 0 auto;
+  height: 38vh;
+  height: 38dvh;
+  min-height: 200px;
+  max-height: 380px;
+  background: var(--paper);
+  z-index: 1;
+}
+
+#map-container::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: var(--rule);
+  z-index: 500;
+  pointer-events: none;
+}
+
+#map { height: 100%; width: 100%; }
+
+.leaflet-tile-pane {
+  filter: saturate(0.15) brightness(1.06) contrast(0.88) sepia(0.05);
+}
+
+.leaflet-control-attribution {
+  font-family: var(--mono) !important;
+  font-size: 9px !important;
+  background: rgba(255, 255, 248, 0.85) !important;
+  color: var(--ink-light) !important;
+}
+
+.leaflet-control-attribution a {
+  color: var(--ink-light) !important;
+}
+
+.place-tooltip {
+  font-family: var(--font) !important;
+  font-size: 14px !important;
+  font-weight: 500 !important;
+  color: var(--ink) !important;
+  background: var(--paper) !important;
+  border: 1px solid var(--rule) !important;
+  border-radius: 0 !important;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.06) !important;
+  padding: 4px 10px !important;
+}
+
+.place-tooltip::before {
+  border-top-color: var(--rule) !important;
+}
+
+.leaflet-container {
+  font-family: var(--font) !important;
+}
+
+/* ─── Scroll Area ─── */
+
+#scroll-area {
+  flex: 1;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-y: contain;
+}
+
+/* ─── Layout ─── */
+
+#places {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 0 24px;
+  padding-bottom: 80px;
+  width: 100%;
+}
+
+/* ─── Header ─── */
+
+header { padding-top: 28px; margin-bottom: 24px; }
+
+header h1 {
+  font-family: var(--font);
+  font-size: 44px;
+  font-weight: 300;
+  font-style: italic;
+  letter-spacing: -0.025em;
+  line-height: 1;
+  margin-bottom: 10px;
+}
+
+#stats {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--ink-light);
+  letter-spacing: 0.03em;
+}
+
+/* ─── Input ─── */
+
+.input-wrap {
+  position: relative;
+  margin-bottom: 24px;
+}
+
+#main-input {
+  width: 100%;
+  font-family: var(--font);
+  font-size: 16px;
+  font-style: italic;
+  color: var(--ink);
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--rule);
+  padding: 10px 0;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+#main-input:focus { border-bottom-color: var(--ink); }
+
+#main-input::placeholder {
+  color: var(--ink-faint);
+  font-style: italic;
+}
+
+#input-status {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--ink-light);
+  height: 18px;
+  line-height: 18px;
+  margin-top: 4px;
+  overflow: hidden;
+}
+
+.input-progress {
+  position: absolute;
+  bottom: 18px;
+  left: 0;
+  height: 1px;
+  width: 0;
+  background: var(--red);
+  transition: width 1.8s linear;
+  pointer-events: none;
+}
+
+.input-progress.running { width: 100%; }
+
+/* ─── Filters ─── */
+
+.filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0;
+  margin-bottom: 4px;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.cat-item {
+  font-size: 14px;
+  font-weight: 400;
+  padding: 6px 0;
+  margin-right: 18px;
+  color: var(--ink-light);
+  cursor: pointer;
+  transition: color 0.15s;
+  white-space: nowrap;
+}
+
+.cat-item:hover { color: var(--ink-mid); }
+.cat-item.active { color: var(--ink); }
+
+#city-filters {
+  margin-bottom: 8px;
+}
+
+#city-filters .cat-item {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.02em;
+  padding: 4px 0;
+  margin-right: 14px;
+}
+
+/* ─── Sort ─── */
+
+.sort-control {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--ink-light);
+  letter-spacing: 0.02em;
+  margin-bottom: 16px;
+  cursor: pointer;
+  -webkit-user-select: none;
+  user-select: none;
+  padding: 4px 0;
+}
+
+.sort-control:hover { color: var(--ink-mid); }
+
+/* ─── Place List ─── */
+
+.place-item {
+  padding: 18px 0;
+  border-top: 1px solid var(--rule);
+  cursor: pointer;
+  transition: opacity 0.2s, background 0.15s;
+}
+
+.place-item:last-child { border-bottom: 1px solid var(--rule); }
+.place-item:active { opacity: 0.55; }
+.place-item.highlight { background: var(--hover); }
+
+.place-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--ink-light);
+  letter-spacing: 0.02em;
+  margin-bottom: 3px;
+}
+
+.place-name {
+  font-size: 20px;
+  font-weight: 500;
+  line-height: 1.28;
+  margin-bottom: 4px;
+  letter-spacing: -0.01em;
+}
+
+.place-address {
+  font-size: 15px;
+  line-height: 1.4;
+  color: var(--ink-mid);
+  margin-bottom: 6px;
+}
+
+.place-tags {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--ink-light);
+  letter-spacing: 0.01em;
+}
+
+/* ─── Empty State ─── */
+
+.empty-state {
+  padding: 48px 0;
+  text-align: center;
+  font-style: italic;
+  color: var(--ink-light);
+  font-size: 15px;
+  display: none;
+}
+
+/* ─── Overlay ─── */
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--paper);
+  transform: translateX(100%);
+  transition: transform 0.35s var(--ease), visibility 0s linear 0.35s;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-y: contain;
+  z-index: 100;
+  visibility: hidden;
+}
+
+.overlay.active {
+  transform: translateX(0);
+  visibility: visible;
+  transition: transform 0.35s var(--ease), visibility 0s linear 0s;
+}
+
+.overlay-content {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 24px;
+  padding-top: calc(24px + env(safe-area-inset-top, 0px));
+  padding-bottom: calc(60px + env(safe-area-inset-bottom, 0px));
+}
+
+/* ─── Back Button ─── */
+
+.back-btn {
+  font-family: var(--font);
+  font-size: 15px;
+  color: var(--ink-light);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 12px 16px 12px 0;
+  margin-bottom: 20px;
+  display: inline-block;
+  -webkit-user-select: none;
+  user-select: none;
+  transition: color 0.15s;
+}
+
+.back-btn:hover { color: var(--ink); }
+
+/* ─── Detail View ─── */
+
+.detail-name {
+  font-size: 30px;
+  font-weight: 400;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+  margin-bottom: 8px;
+}
+
+.detail-address {
+  font-size: 16px;
+  color: var(--ink-mid);
+  line-height: 1.4;
+  margin-bottom: 4px;
+}
+
+.detail-meta {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--ink-light);
+  letter-spacing: 0.02em;
+  margin-bottom: 28px;
+}
+
+.detail-notes {
+  font-size: 17px;
+  line-height: 1.7;
+  font-style: italic;
+  margin-bottom: 20px;
+  color: var(--ink-mid);
+}
+
+.detail-tags {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-light);
+  letter-spacing: 0.01em;
+}
+
+.detail-rule {
+  border: none;
+  border-top: 1px solid var(--rule);
+  margin: 28px 0;
+}
+
+/* ─── Sections ─── */
+
+.section-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--ink-light);
+  margin-bottom: 14px;
+}
+
+.nearby-item {
+  padding: 10px 0;
+  cursor: pointer;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.nearby-item:active { opacity: 0.5; }
+
+.nearby-title {
+  display: block;
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 1.3;
+  margin-bottom: 2px;
+  transition: color 0.15s;
+}
+
+.nearby-item:hover .nearby-title { color: var(--red); }
+
+.nearby-meta {
+  display: block;
+  font-size: 13px;
+  color: var(--ink-light);
+}
+
+/* ─── Actions ─── */
+
+.detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 24px;
+  align-items: baseline;
+}
+
+.action-link {
+  font-family: var(--font);
+  font-size: 15px;
+  color: var(--red);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 10px 0;
+  text-decoration: none;
+  display: inline-block;
+  -webkit-user-select: none;
+  user-select: none;
+  transition: color 0.15s;
+}
+
+.action-link:hover { color: var(--red-light); }
+
+.action-link.muted {
+  color: var(--ink-light);
+}
+
+.action-link.muted:hover { color: var(--ink-mid); }
+
+/* ─── Notes Edit ─── */
+
+.notes-edit {
+  width: 100%;
+  font-family: var(--font);
+  font-size: 17px;
+  font-style: italic;
+  line-height: 1.7;
+  color: var(--ink-mid);
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--rule);
+  padding: 0 0 8px 0;
+  outline: none;
+  resize: none;
+  min-height: 60px;
+  margin-bottom: 20px;
+  transition: border-color 0.2s;
+}
+
+.notes-edit:focus { border-bottom-color: var(--ink); }
+
+.notes-edit::placeholder {
+  color: var(--ink-faint);
+}
+
+/* ─── Toast ─── */
+
+.toast {
+  position: fixed;
+  bottom: calc(28px + env(safe-area-inset-bottom, 0px));
+  left: 50%;
+  transform: translateX(-50%) translateY(20px);
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  color: var(--ink);
+  background: var(--paper);
+  padding: 8px 20px;
+  border: 1px solid var(--rule);
+  opacity: 0;
+  transition: opacity 0.3s, transform 0.3s var(--ease);
+  z-index: 9999;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.toast.visible {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+/* ─── Animations ─── */
+
+@keyframes fadeSlideIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-in {
+  animation: fadeSlideIn 0.45s var(--ease) both;
+}
+
+/* ─── Responsive ─── */
+
+@media (min-width: 700px) {
+  .overlay-content { padding-left: 40px; padding-right: 40px; }
+  #places { padding-left: 40px; padding-right: 40px; }
+}
+
+@media (max-width: 380px) {
+  header h1 { font-size: 36px; }
+  .detail-name { font-size: 26px; }
+  .cat-item { margin-right: 12px; font-size: 13px; }
+}
+
+@media (max-height: 600px) {
+  #map-container { min-height: 160px; height: 30vh; }
+}
+</style>
+</head>
+<body>
+
+<div id="map-container">
+  <div id="map"></div>
+</div>
+
+<div id="scroll-area">
+  <main id="places">
+    <header>
+      <h1>locus</h1>
+      <p id="stats"></p>
+    </header>
+
+    <div class="input-wrap">
+      <input type="text" id="main-input" placeholder="paste a url to save a place..." autocomplete="off" spellcheck="false">
+      <div class="input-progress" id="input-progress"></div>
+      <div id="input-status"></div>
+    </div>
+
+    <nav class="filter-row" id="type-filters"></nav>
+    <nav class="filter-row" id="city-filters"></nav>
+    <div class="sort-control" id="sort-btn"></div>
+    <div id="place-list"></div>
+    <div class="empty-state" id="empty-state">No places found.</div>
+  </main>
+</div>
+
+<div class="overlay" id="detail-overlay">
+  <div class="overlay-content" id="detail-content"></div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+/* ═══════════════════════════════════════════
+   Locus — Place Collection
+   ═══════════════════════════════════════════ */
+
+// ── Seed Data ──────────────────────────────
+
+const SEED = [
+  {
+    id: 1, name: 'Di Fara Pizza',
+    address: '1424 Avenue J, Brooklyn', city: 'New York',
+    type: 'Restaurant', tags: ['pizza', 'italian', 'classic'],
+    lat: 40.6250, lng: -73.9615,
+    url: 'https://www.difarany.com',
+    dateAdded: '2026-04-10T14:30:00',
+    notes: "Dom DeMarco's legendary slice shop. Cash only, prepare to wait, bring patience.",
+    isFavorite: true
+  },
+  {
+    id: 2, name: 'The Met Cloisters',
+    address: '99 Margaret Corbin Dr, Fort Tryon Park', city: 'New York',
+    type: 'Museum', tags: ['medieval', 'art', 'architecture'],
+    lat: 40.8649, lng: -73.9319,
+    url: 'https://www.metmuseum.org/visit/met-cloisters',
+    dateAdded: '2026-04-09T10:00:00',
+    notes: 'Medieval art in a reconstructed monastery overlooking the Hudson. Best on a quiet weekday.',
+    isFavorite: true
+  },
+  {
+    id: 3, name: 'Attaboy',
+    address: '134 Eldridge St, Lower East Side', city: 'New York',
+    type: 'Bar', tags: ['cocktails', 'speakeasy', 'intimate'],
+    lat: 40.7191, lng: -73.9927,
+    url: 'https://attaboy.us',
+    dateAdded: '2026-04-08T20:00:00',
+    notes: "No menu \u2014 tell the bartender what you like and they'll make something perfect.",
+    isFavorite: false
+  },
+  {
+    id: 4, name: 'Stumptown Coffee Roasters',
+    address: '128 SW 3rd Ave', city: 'Portland',
+    type: 'Caf\u00e9', tags: ['coffee', 'third-wave', 'roastery'],
+    lat: 45.5205, lng: -122.6735,
+    url: 'https://www.stumptowncoffee.com',
+    dateAdded: '2026-04-07T09:15:00',
+    notes: 'The original location. Hair Bender espresso is still the benchmark.',
+    isFavorite: false
+  },
+  {
+    id: 5, name: "Powell's City of Books",
+    address: '1005 W Burnside St', city: 'Portland',
+    type: 'Shop', tags: ['books', 'independent', 'landmark'],
+    lat: 45.5231, lng: -122.6815,
+    url: 'https://www.powells.com',
+    dateAdded: '2026-04-06T11:30:00',
+    notes: 'An entire city block of books. Get the map at the entrance. Plan to lose an afternoon.',
+    isFavorite: true
+  },
+  {
+    id: 6, name: 'Le Comptoir du Panth\u00e9on',
+    address: '5 Rue Soufflot, 5e', city: 'Paris',
+    type: 'Caf\u00e9', tags: ['terrace', 'classic', 'people-watching'],
+    lat: 48.8462, lng: 2.3444,
+    url: 'https://comptoirdupantheon.fr',
+    dateAdded: '2026-04-05T16:00:00',
+    notes: 'Sidewalk tables facing the Panth\u00e9on. Order a cr\u00e8me and watch the world.',
+    isFavorite: false
+  },
+  {
+    id: 7, name: "Mus\u00e9e d'Orsay",
+    address: "1 Rue de la L\u00e9gion d'Honneur, 7e", city: 'Paris',
+    type: 'Museum', tags: ['impressionism', 'art', 'beaux-arts'],
+    lat: 48.8600, lng: 2.3266,
+    url: 'https://www.musee-orsay.fr',
+    dateAdded: '2026-04-04T10:45:00',
+    notes: 'The converted railway station alone is worth the visit. Top floor has the best light.',
+    isFavorite: true
+  },
+  {
+    id: 8, name: 'Tsukiji Outer Market',
+    address: '4 Chome-16 Tsukiji, Chuo City', city: 'Tokyo',
+    type: 'Market', tags: ['seafood', 'street-food', 'morning'],
+    lat: 35.6654, lng: 139.7707,
+    url: 'https://www.tsukiji.or.jp',
+    dateAdded: '2026-04-03T07:00:00',
+    notes: 'Go early. Tamagoyaki from Yamacho, then tuna bowl at Sushi Dai if the line is short.',
+    isFavorite: false
+  },
+  {
+    id: 9, name: 'Golden Gai',
+    address: '1 Chome Kabukicho, Shinjuku', city: 'Tokyo',
+    type: 'Bar', tags: ['nightlife', 'tiny-bars', 'atmosphere'],
+    lat: 35.6938, lng: 139.7036,
+    url: 'https://en.wikipedia.org/wiki/Shinjuku_Golden_Gai',
+    dateAdded: '2026-04-02T21:30:00',
+    notes: 'Six narrow alleys of micro-bars. Each seats 5\u20138 people. Some charge a cover \u2014 ask first.',
+    isFavorite: true
+  },
+  {
+    id: 10, name: 'Dishoom',
+    address: "5 Stable St, King's Cross", city: 'London',
+    type: 'Restaurant', tags: ['indian', 'bombay-cafe', 'brunch'],
+    lat: 51.5358, lng: -0.1260,
+    url: 'https://www.dishoom.com',
+    dateAdded: '2026-04-01T12:00:00',
+    notes: 'Bombay caf\u00e9\u2013inspired. The bacon naan roll at breakfast is non-negotiable.',
+    isFavorite: false
+  },
+  {
+    id: 11, name: 'Daunt Books',
+    address: '83 Marylebone High St', city: 'London',
+    type: 'Shop', tags: ['books', 'travel', 'edwardian'],
+    lat: 51.5213, lng: -0.1518,
+    url: 'https://www.dauntbooks.co.uk',
+    dateAdded: '2026-03-30T15:00:00',
+    notes: 'Organized by country, not genre. The long Edwardian gallery with skylights is beautiful.',
+    isFavorite: true
+  },
+  {
+    id: 12, name: 'Pho Thin',
+    address: '13 L\u00f2 \u0110\u00fac, Hai B\u00e0 Tr\u01b0ng', city: 'Hanoi',
+    type: 'Restaurant', tags: ['pho', 'street-food', 'local'],
+    lat: 21.0195, lng: 105.8585,
+    url: 'https://en.wikipedia.org/wiki/Pho_Thin',
+    dateAdded: '2026-03-28T08:00:00',
+    notes: "One dish, done perfectly since 1979. Sit on a tiny stool. Don't overthink it.",
+    isFavorite: false
+  }
+];
+
+// ── City Centers ──────────────────────────
+
+const CITY_CENTERS = {
+  'New York':  { lat: 40.7480, lng: -73.9632, zoom: 11 },
+  'Portland':  { lat: 45.5218, lng: -122.6775, zoom: 13 },
+  'Paris':     { lat: 48.8531, lng: 2.3355, zoom: 13 },
+  'Tokyo':     { lat: 35.6796, lng: 139.7372, zoom: 12 },
+  'London':    { lat: 51.5286, lng: -0.1389, zoom: 13 },
+  'Hanoi':     { lat: 21.0195, lng: 105.8585, zoom: 14 }
+};
+
+// ── State ──────────────────────────────────
+
+const STORAGE_KEY = 'locus_v1';
+
+const SORTS = [
+  { key: 'newest', label: 'newest first' },
+  { key: 'oldest', label: 'oldest first' },
+  { key: 'alpha',  label: 'a \u2192 z' },
+  { key: 'city',   label: 'by city' }
+];
+
+const state = {
+  places: [],
+  typeFilter: 'All',
+  cityFilter: 'All',
+  sortIndex: 0,
+  search: '',
+  currentPlace: null
+};
+
+// ── Utilities ──────────────────────────────
+
+const $ = id => document.getElementById(id);
+
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+function formatDate(iso) {
+  const d = new Date(iso);
+  const now = new Date();
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const m = months[d.getMonth()];
+  const day = d.getDate();
+  if (d.getFullYear() !== now.getFullYear()) return `${m} ${day}, ${d.getFullYear()}`;
+  return `${m} ${day}`;
+}
+
+function isUrl(s) {
+  const t = s.trim();
+  if (t.includes(' ') || t.length < 4) return false;
+  return /^https?:\/\//i.test(t) || /^[a-z0-9][-a-z0-9]*\.[a-z]{2,}/i.test(t);
+}
+
+function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// ── Persistence ────────────────────────────
+
+function save() {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      places: state.places,
+      typeFilter: state.typeFilter,
+      cityFilter: state.cityFilter,
+      sortIndex: state.sortIndex
+    }));
+  } catch(e) {}
+}
+
+function load() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) {
+      const d = JSON.parse(raw);
+      if (d.places && d.places.length) {
+        state.places = d.places;
+        state.typeFilter = d.typeFilter || 'All';
+        state.cityFilter = d.cityFilter || 'All';
+        state.sortIndex = d.sortIndex || 0;
+        return;
+      }
+    }
+  } catch(e) {}
+  state.places = JSON.parse(JSON.stringify(SEED));
+}
+
+// ── Toast ──────────────────────────────────
+
+let toastTimer;
+function toast(msg) {
+  const el = $('toast');
+  el.textContent = msg;
+  el.classList.add('visible');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('visible'), 2000);
+}
+
+// ── Map ────────────────────────────────────
+
+let map, markerLayer, markerMap = {};
+
+function initMap() {
+  try {
+    map = L.map('map', {
+      zoomControl: false,
+      attributionControl: true
+    }).setView([40, 0], 2);
+
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/">CARTO</a>',
+      subdomains: 'abcd',
+      maxZoom: 19
+    }).addTo(map);
+
+    markerLayer = L.layerGroup().addTo(map);
+  } catch(e) {
+    console.warn('Map failed to initialize:', e);
+  }
+}
+
+function updateMarkers() {
+  if (!map || !markerLayer) return;
+
+  markerLayer.clearLayers();
+  markerMap = {};
+
+  const filtered = getFiltered();
+  const bounds = [];
+
+  filtered.forEach(p => {
+    const marker = L.circleMarker([p.lat, p.lng], {
+      radius: 6,
+      fillColor: '#8B0000',
+      fillOpacity: 0.8,
+      color: '#FFFFF8',
+      weight: 2,
+      opacity: 1
+    });
+
+    marker.bindTooltip(p.name, {
+      direction: 'top',
+      offset: [0, -8],
+      className: 'place-tooltip'
+    });
+
+    marker.on('click', () => showDetail(p.id));
+
+    marker.on('mouseover', () => {
+      marker.setRadius(9);
+      const el = document.querySelector(`.place-item[data-id="${p.id}"]`);
+      if (el) el.classList.add('highlight');
+    });
+
+    marker.on('mouseout', () => {
+      marker.setRadius(6);
+      const el = document.querySelector(`.place-item[data-id="${p.id}"]`);
+      if (el) el.classList.remove('highlight');
+    });
+
+    marker.addTo(markerLayer);
+    markerMap[p.id] = marker;
+    bounds.push([p.lat, p.lng]);
+  });
+
+  if (state.cityFilter !== 'All' && CITY_CENTERS[state.cityFilter]) {
+    const c = CITY_CENTERS[state.cityFilter];
+    map.flyTo([c.lat, c.lng], c.zoom, { duration: 0.8 });
+  } else if (bounds.length > 0) {
+    map.flyToBounds(bounds, { padding: [40, 40], maxZoom: 14, duration: 0.8 });
+  }
+}
+
+function highlightMarker(id) {
+  const m = markerMap[id];
+  if (m) {
+    m.setRadius(9);
+    m.setStyle({ fillColor: '#a52a2a' });
+  }
+}
+
+function unhighlightMarker(id) {
+  const m = markerMap[id];
+  if (m) {
+    m.setRadius(6);
+    m.setStyle({ fillColor: '#8B0000' });
+  }
+}
+
+// ── Stats ──────────────────────────────────
+
+function renderStats() {
+  const total = state.places.length;
+  const cities = new Set(state.places.map(p => p.city)).size;
+  const saved = state.places.filter(p => p.isFavorite).length;
+  $('stats').textContent = `${total} places \u00B7 ${cities} cities \u00B7 ${saved} saved`;
+}
+
+// ── Filters ────────────────────────────────
+
+function getTypes() {
+  const types = new Set(state.places.map(p => p.type));
+  return ['All', 'Saved', ...Array.from(types).sort()];
+}
+
+function getCities() {
+  const cities = new Set(state.places.map(p => p.city));
+  return ['All', ...Array.from(cities).sort()];
+}
+
+function renderTypeFilters() {
+  const types = getTypes();
+  $('type-filters').innerHTML = types.map(t =>
+    `<span class="cat-item${state.typeFilter === t ? ' active' : ''}" data-type="${esc(t)}">${esc(t)}</span>`
+  ).join('');
+}
+
+function renderCityFilters() {
+  const cities = getCities();
+  $('city-filters').innerHTML = cities.map(c =>
+    `<span class="cat-item${state.cityFilter === c ? ' active' : ''}" data-city="${esc(c)}">${c === 'All' ? 'All Cities' : esc(c)}</span>`
+  ).join('');
+}
+
+// ── Sort ───────────────────────────────────
+
+function renderSort() {
+  $('sort-btn').textContent = SORTS[state.sortIndex].label + ' \u2193';
+}
+
+// ── Place List ─────────────────────────────
+
+function getFiltered() {
+  let list = [...state.places];
+
+  if (state.typeFilter === 'Saved') {
+    list = list.filter(p => p.isFavorite);
+  } else if (state.typeFilter !== 'All') {
+    list = list.filter(p => p.type === state.typeFilter);
+  }
+
+  if (state.cityFilter !== 'All') {
+    list = list.filter(p => p.city === state.cityFilter);
+  }
+
+  if (state.search) {
+    const q = state.search.toLowerCase();
+    list = list.filter(p =>
+      p.name.toLowerCase().includes(q) ||
+      p.address.toLowerCase().includes(q) ||
+      p.city.toLowerCase().includes(q) ||
+      p.type.toLowerCase().includes(q) ||
+      p.notes.toLowerCase().includes(q) ||
+      p.tags.some(t => t.includes(q))
+    );
+  }
+
+  const sort = SORTS[state.sortIndex].key;
+  switch (sort) {
+    case 'newest': list.sort((a, b) => new Date(b.dateAdded) - new Date(a.dateAdded)); break;
+    case 'oldest': list.sort((a, b) => new Date(a.dateAdded) - new Date(b.dateAdded)); break;
+    case 'alpha':  list.sort((a, b) => a.name.localeCompare(b.name)); break;
+    case 'city':   list.sort((a, b) => a.city.localeCompare(b.city) || a.name.localeCompare(b.name)); break;
+  }
+
+  return list;
+}
+
+function renderPlaces() {
+  const places = getFiltered();
+  const container = $('place-list');
+  const empty = $('empty-state');
+
+  if (!places.length) {
+    container.innerHTML = '';
+    empty.style.display = 'block';
+    return;
+  }
+
+  empty.style.display = 'none';
+
+  container.innerHTML = places.map(p => `
+    <article class="place-item" data-id="${p.id}">
+      <div class="place-meta">
+        <span>${esc(p.type)} \u00B7 ${esc(p.city)}</span>
+        <span>${formatDate(p.dateAdded)}</span>
+      </div>
+      <h2 class="place-name">${esc(p.name)}</h2>
+      <p class="place-address">${esc(p.address)}</p>
+      <div class="place-tags">${p.tags.map(t => esc(t)).join(' \u00B7 ')}</div>
+    </article>
+  `).join('');
+}
+
+// ── Detail View ────────────────────────────
+
+function getNearby(place) {
+  return state.places
+    .filter(p => p.id !== place.id && p.city === place.city)
+    .slice(0, 4);
+}
+
+function renderDetail(place) {
+  const nearby = getNearby(place);
+  const dc = $('detail-content');
+
+  const osmUrl = `https://www.openstreetmap.org/?mlat=${place.lat}&mlon=${place.lng}#map=17/${place.lat}/${place.lng}`;
+
+  dc.innerHTML = `
+    <button class="back-btn" data-action="back">\u2190 Back</button>
+
+    <h1 class="detail-name">${esc(place.name)}</h1>
+    <p class="detail-address">${esc(place.address)}</p>
+    <p class="detail-meta">${esc(place.type)} \u00B7 ${esc(place.city)} \u00B7 ${formatDate(place.dateAdded)}</p>
+
+    <p class="detail-notes" id="detail-notes-display">${place.notes ? esc(place.notes) : '<span style="color:var(--ink-faint)">No notes yet.</span>'}</p>
+
+    <p class="detail-tags">${place.tags.map(t => esc(t)).join(' \u00B7 ')}</p>
+
+    <hr class="detail-rule">
+
+    ${nearby.length ? `
+      <div class="section-label">Nearby in ${esc(place.city)}</div>
+      ${nearby.map(n => `
+        <div class="nearby-item" data-id="${n.id}">
+          <span class="nearby-title">${esc(n.name)}</span>
+          <span class="nearby-meta">${esc(n.type)} \u00B7 ${esc(n.address)}</span>
+        </div>
+      `).join('')}
+      <hr class="detail-rule">
+    ` : ''}
+
+    <div class="detail-actions">
+      <button class="action-link" data-action="toggle-fav">${place.isFavorite ? 'Saved \u25C6' : 'Save'}</button>
+      <button class="action-link" data-action="edit-notes">Edit notes</button>
+      <a class="action-link muted" href="${esc(osmUrl)}" target="_blank" rel="noopener">View on map \u2197</a>
+      <button class="action-link muted" data-action="delete">Remove</button>
+    </div>
+  `;
+}
+
+// ── Navigation ─────────────────────────────
+
+function showDetail(id) {
+  const place = state.places.find(p => p.id === id);
+  if (!place) return;
+  state.currentPlace = place;
+  renderDetail(place);
+  $('detail-overlay').classList.add('active');
+  $('detail-overlay').scrollTop = 0;
+  document.body.classList.add('no-scroll');
+}
+
+function goBack() {
+  if ($('detail-overlay').classList.contains('active')) {
+    $('detail-overlay').classList.remove('active');
+    document.body.classList.remove('no-scroll');
+    renderAll();
+  }
+}
+
+// ── Actions ────────────────────────────────
+
+function toggleFav(id) {
+  const p = state.places.find(x => x.id === id);
+  if (!p) return;
+  p.isFavorite = !p.isFavorite;
+  save();
+  renderDetail(p);
+  renderStats();
+  toast(p.isFavorite ? 'Saved' : 'Removed from saved');
+}
+
+function deletePlace(id) {
+  state.places = state.places.filter(p => p.id !== id);
+  save();
+  goBack();
+  toast('Place removed');
+}
+
+function editNotes(place) {
+  const display = $('detail-notes-display');
+  if (!display) return;
+
+  const textarea = document.createElement('textarea');
+  textarea.className = 'notes-edit';
+  textarea.placeholder = 'Add a note\u2026';
+  textarea.value = place.notes || '';
+  display.replaceWith(textarea);
+  textarea.focus();
+
+  const saveNotes = () => {
+    place.notes = textarea.value.trim();
+    save();
+    renderDetail(place);
+  };
+
+  textarea.addEventListener('blur', saveNotes);
+  textarea.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      textarea.blur();
+    }
+  });
+}
+
+// ── Add Place ──────────────────────────────
+
+const PLACE_NAMES = [
+  'The Golden Lantern', 'Blue Door Kitchen', 'Café Andante', 'The Wren',
+  'Maison Collective', 'Salt & Time', 'Park Bench Espresso', 'Otoko',
+  'The Spotted Pig', 'Libretto', 'Chez Margaux', 'Nightingale',
+  'Bread & Butterflies', 'The Alchemist', 'Lotus Room', 'Still Life'
+];
+
+function generatePlace(url) {
+  let domain;
+  try {
+    const u = new URL(url.startsWith('http') ? url : 'https://' + url);
+    domain = u.hostname.replace(/^www\./, '');
+  } catch { domain = 'place.com'; }
+
+  // Try to extract a name from the URL path
+  const pathParts = url.replace(/^https?:\/\//, '')
+    .split(/[\/\-_?&#=.]/)
+    .filter(w => w.length > 2 && !/^(www|com|org|net|html|php|http|https)$/i.test(w));
+
+  let name;
+  if (pathParts.length > 1) {
+    name = pathParts.slice(0, 3).map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' ');
+  } else {
+    name = PLACE_NAMES[Math.floor(Math.random() * PLACE_NAMES.length)];
+  }
+
+  const cityNames = Object.keys(CITY_CENTERS);
+  const city = cityNames[Math.floor(Math.random() * cityNames.length)];
+  const center = CITY_CENTERS[city];
+
+  const types = ['Restaurant', 'Caf\u00e9', 'Bar', 'Museum', 'Shop', 'Market', 'Attraction'];
+  const type = types[Math.floor(Math.random() * types.length)];
+
+  const lat = center.lat + (Math.random() - 0.5) * 0.03;
+  const lng = center.lng + (Math.random() - 0.5) * 0.03;
+
+  const tagPools = {
+    'Restaurant': ['dinner', 'lunch', 'local-favorite', 'casual', 'fine-dining', 'comfort-food'],
+    'Caf\u00e9': ['coffee', 'pastries', 'workspace', 'morning', 'cozy', 'third-wave'],
+    'Bar': ['cocktails', 'wine', 'late-night', 'intimate', 'craft-beer', 'live-music'],
+    'Museum': ['art', 'history', 'contemporary', 'photography', 'free-entry', 'architecture'],
+    'Shop': ['boutique', 'vintage', 'design', 'local', 'gifts', 'specialty'],
+    'Market': ['fresh', 'street-food', 'local', 'weekend', 'artisan', 'produce'],
+    'Attraction': ['landmark', 'outdoor', 'scenic', 'historic', 'walking', 'free']
+  };
+  const pool = tagPools[type] || tagPools['Restaurant'];
+  const tags = [...pool].sort(() => Math.random() - 0.5).slice(0, 2 + Math.floor(Math.random() * 2));
+
+  const streetNum = Math.floor(Math.random() * 300) + 1;
+  const streets = ['Main St', 'Oak Ave', 'Park Rd', 'Market St', 'High St', 'First Ave', 'River Ln', 'Church St'];
+  const address = `${streetNum} ${streets[Math.floor(Math.random() * streets.length)]}`;
+
+  return {
+    id: Date.now() + Math.floor(Math.random() * 1000),
+    name, address, city, type, tags,
+    lat, lng,
+    url: url.startsWith('http') ? url : 'https://' + url,
+    dateAdded: new Date().toISOString(),
+    notes: `Discovered via ${domain}.`,
+    isFavorite: false
+  };
+}
+
+let isProcessing = false;
+
+async function addPlace(url) {
+  if (isProcessing) return;
+  isProcessing = true;
+
+  const input = $('main-input');
+  const status = $('input-status');
+  const progressBar = $('input-progress');
+
+  input.value = '';
+  input.disabled = true;
+  status.textContent = 'locating\u2026';
+  progressBar.classList.add('running');
+
+  await delay(600);
+  status.textContent = 'extracting details\u2026';
+  await delay(500);
+  status.textContent = 'categorizing\u2026';
+  await delay(600);
+
+  const place = generatePlace(url);
+  state.places.unshift(place);
+  save();
+
+  progressBar.classList.remove('running');
+  progressBar.style.transition = 'none';
+  progressBar.style.width = '0';
+  requestAnimationFrame(() => { progressBar.style.transition = ''; });
+
+  status.textContent = '';
+  input.disabled = false;
+  input.focus();
+
+  renderAll();
+
+  const newEl = document.querySelector(`[data-id="${place.id}"]`);
+  if (newEl) newEl.classList.add('animate-in');
+
+  toast('Place added');
+  isProcessing = false;
+}
+
+// ── Render All ─────────────────────────────
+
+function renderAll() {
+  renderStats();
+  renderTypeFilters();
+  renderCityFilters();
+  renderSort();
+  renderPlaces();
+  updateMarkers();
+}
+
+// ── Events ─────────────────────────────────
+
+function bindEvents() {
+  const input = $('main-input');
+  const status = $('input-status');
+
+  // Main input
+  input.addEventListener('input', () => {
+    const val = input.value.trim();
+    if (isUrl(val)) {
+      status.textContent = '\u21B5 to add place';
+      state.search = '';
+    } else {
+      status.textContent = '';
+      state.search = val;
+    }
+    renderPlaces();
+    updateMarkers();
+  });
+
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      const val = input.value.trim();
+      if (isUrl(val)) {
+        e.preventDefault();
+        addPlace(val);
+      }
+    }
+    if (e.key === 'Escape') {
+      input.value = '';
+      state.search = '';
+      status.textContent = '';
+      renderPlaces();
+      updateMarkers();
+      input.blur();
+    }
+  });
+
+  // Type filters
+  $('type-filters').addEventListener('click', (e) => {
+    const item = e.target.closest('.cat-item');
+    if (!item) return;
+    state.typeFilter = item.dataset.type;
+    save();
+    renderTypeFilters();
+    renderPlaces();
+    updateMarkers();
+  });
+
+  // City filters
+  $('city-filters').addEventListener('click', (e) => {
+    const item = e.target.closest('.cat-item');
+    if (!item) return;
+    state.cityFilter = item.dataset.city;
+    save();
+    renderCityFilters();
+    renderPlaces();
+    updateMarkers();
+  });
+
+  // Sort
+  $('sort-btn').addEventListener('click', () => {
+    state.sortIndex = (state.sortIndex + 1) % SORTS.length;
+    save();
+    renderSort();
+    renderPlaces();
+  });
+
+  // Place list — click to detail
+  $('place-list').addEventListener('click', (e) => {
+    const item = e.target.closest('.place-item');
+    if (item) showDetail(parseInt(item.dataset.id));
+  });
+
+  // Place list — hover cross-reference with map
+  $('place-list').addEventListener('mouseover', (e) => {
+    const item = e.target.closest('.place-item');
+    if (item) highlightMarker(parseInt(item.dataset.id));
+  });
+
+  $('place-list').addEventListener('mouseout', (e) => {
+    const item = e.target.closest('.place-item');
+    if (item) unhighlightMarker(parseInt(item.dataset.id));
+  });
+
+  // Detail view actions
+  $('detail-content').addEventListener('click', (e) => {
+    const action = e.target.closest('[data-action]');
+    if (action) {
+      const act = action.dataset.action;
+      if (act === 'back') { goBack(); return; }
+      if (act === 'toggle-fav') { toggleFav(state.currentPlace.id); return; }
+      if (act === 'edit-notes') { editNotes(state.currentPlace); return; }
+      if (act === 'delete') { deletePlace(state.currentPlace.id); return; }
+    }
+    const nearby = e.target.closest('.nearby-item');
+    if (nearby) {
+      const id = parseInt(nearby.dataset.id);
+      const place = state.places.find(p => p.id === id);
+      if (place) {
+        state.currentPlace = place;
+        renderDetail(place);
+        $('detail-overlay').scrollTop = 0;
+      }
+    }
+  });
+
+  // Keyboard: Escape to go back
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      if ($('detail-overlay').classList.contains('active')) {
+        goBack();
+      }
+    }
+  });
+
+  // Hardware back
+  window.addEventListener('popstate', () => {
+    if ($('detail-overlay').classList.contains('active')) {
+      goBack();
+    }
+  });
+}
+
+// ── Init ───────────────────────────────────
+
+function init() {
+  load();
+  initMap();
+  renderAll();
+  bindEvents();
+}
+
+init();
+</script>
+</body>
+</html>

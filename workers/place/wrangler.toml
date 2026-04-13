@@ -1,0 +1,13 @@
+name = "locus-place"
+main = "src/index.js"
+compatibility_date = "2026-04-01"
+workers_dev = true
+
+services = [
+  { binding = "METADATA", service = "locus-metadata" },
+  { binding = "GEOCODE", service = "locus-geocode" }
+]
+
+[vars]
+ALLOWED_ORIGINS = "http://localhost:8020,http://127.0.0.1:8020,https://emh.github.io,https://emh.io"
+READER_FALLBACK_URL = "https://r.jina.ai/http://r.jina.ai/http://"
