@@ -169,6 +169,10 @@ header h1 {
   margin-bottom: 24px;
 }
 
+.input-field {
+  position: relative;
+}
+
 #main-input {
   width: 100%;
   padding: 10px 0;
@@ -209,7 +213,7 @@ header h1 {
 
 .input-progress {
   position: absolute;
-  bottom: 18px;
+  bottom: 0;
   left: 0;
   width: 0;
   height: 1px;
@@ -399,6 +403,13 @@ header h1 {
   line-height: 1.2;
 }
 
+.detail-map {
+  height: 190px;
+  margin-bottom: 24px;
+  border-bottom: 1px solid var(--rule);
+  background: var(--paper);
+}
+
 .detail-address {
   margin-bottom: 4px;
   color: var(--ink-mid);
@@ -477,7 +488,7 @@ header h1 {
 .detail-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 24px;
+  gap: 6px 18px;
   align-items: baseline;
 }
 
@@ -493,6 +504,7 @@ header h1 {
   text-decoration: none;
   transition: color 0.15s;
   user-select: none;
+  white-space: nowrap;
 }
 
 .action-link:hover {
@@ -510,6 +522,7 @@ header h1 {
 .delete-confirm-label {
   color: var(--ink-light);
   font-size: 15px;
+  white-space: nowrap;
 }
 
 .edit-form {

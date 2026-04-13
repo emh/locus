@@ -5,6 +5,7 @@ workers_dev = true
 
 services = [
   { binding = "METADATA", service = "locus-metadata" },
+  { binding = "METADATA_WEB", service = "locus-metadata-web" },
   { binding = "GEOCODE", service = "locus-geocode" }
 ]
 

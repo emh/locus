@@ -21,6 +21,7 @@ const state = {
 const $ = id => document.getElementById(id);
 
 let map;
+let detailMap;
 let markerLayer;
 let isProcessing = false;
 let toastTimer;
@@ -82,15 +83,6 @@ function includesText(haystack, needle) {
 
 function hasCoordinates(place) {
   return Number.isFinite(place.lat) && Number.isFinite(place.lng);
-}
-
-function mapUrl(place) {
-  if (hasCoordinates(place)) {
-    return `https://www.openstreetmap.org/?mlat=${place.lat}&mlon=${place.lng}#map=17/${place.lat}/${place.lng}`;
-  }
-
-  const query = encodeURIComponent(locationLabel(place));
-  return `https://www.openstreetmap.org/search?query=${query}`;
 }
 
 function getCurrentPlace() {
@@ -307,6 +299,7 @@ function getNearby(place) {
 
 function renderDetail(place) {
   const container = $("detail-content");
+  destroyDetailMap();
   if (state.isEditing) {
     renderEditForm(place);
     return;
@@ -319,6 +312,7 @@ function renderDetail(place) {
   container.innerHTML = `
     <button class="back-btn" data-action="back" type="button">Back</button>
 
+    ${hasCoordinates(place) ? `<div class="detail-map" id="detail-map"></div>` : ""}
     <h1 class="detail-name">${esc(place.name)}</h1>
     <p class="detail-address">${esc(locationLabel(place))}</p>
     <p class="detail-meta">${esc(place.type || "Other")} - ${esc(cityLabel(place))} - ${formatDate(place.dateAdded)}</p>
@@ -341,12 +335,54 @@ function renderDetail(place) {
     ` : ""}
 
     <div class="detail-actions">
-      <button class="action-link" data-action="edit" type="button">Edit details</button>
-      <a class="action-link muted" href="${esc(place.url)}" target="_blank" rel="noopener">Open site</a>
-      <a class="action-link muted" href="${esc(mapUrl(place))}" target="_blank" rel="noopener">View on map</a>
+      <button class="action-link" data-action="edit" type="button">Edit</button>
+      <a class="action-link muted" href="${esc(place.url)}" target="_blank" rel="noopener">Website</a>
       ${renderDeleteAction(place)}
     </div>
   `;
+
+  renderDetailMap(place);
+}
+
+function renderDetailMap(place) {
+  const Leaflet = globalThis.L;
+  const container = $("detail-map");
+  if (!Leaflet || !container || !hasCoordinates(place)) return;
+
+  detailMap = Leaflet.map(container, {
+    zoomControl: false,
+    attributionControl: false,
+    dragging: false,
+    scrollWheelZoom: false,
+    doubleClickZoom: false,
+    boxZoom: false,
+    keyboard: false,
+    tap: false,
+    touchZoom: false
+  }).setView([place.lat, place.lng], 17);
+
+  Leaflet.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {
+    attribution: "&copy; OpenStreetMap &copy; CARTO",
+    subdomains: "abcd",
+    maxZoom: 19
+  }).addTo(detailMap);
+
+  Leaflet.circleMarker([place.lat, place.lng], {
+    radius: 7,
+    fillColor: "#8b0000",
+    fillOpacity: 0.85,
+    color: "#fffff8",
+    weight: 2,
+    opacity: 1
+  }).addTo(detailMap);
+
+  requestAnimationFrame(() => detailMap?.invalidateSize());
+}
+
+function destroyDetailMap() {
+  if (!detailMap) return;
+  detailMap.remove();
+  detailMap = null;
 }
 
 function renderDeleteAction(place) {
@@ -362,10 +398,11 @@ function renderDeleteAction(place) {
 }
 
 function renderEditForm(place) {
+  destroyDetailMap();
   $("detail-content").innerHTML = `
     <button class="back-btn" data-action="cancel-edit" type="button">Back</button>
 
-    <h1 class="detail-name">Edit details</h1>
+    <h1 class="detail-name">Edit</h1>
     <p class="detail-meta">${esc(place.source)} - ${formatDate(place.dateAdded)}</p>
 
     <form class="edit-form" id="place-edit-form">
@@ -445,6 +482,7 @@ function showDetail(id, options = {}) {
 
 function goBack() {
   if (!$("detail-overlay").classList.contains("active")) return;
+  destroyDetailMap();
   $("detail-overlay").classList.remove("active");
   document.body.classList.remove("no-scroll");
   state.currentPlaceId = null;
@@ -590,6 +628,7 @@ function deleteCurrentPlace() {
   state.isEditing = false;
   save();
 
+  destroyDetailMap();
   $("detail-overlay").classList.remove("active");
   document.body.classList.remove("no-scroll");
   renderAll();

@@ -23,14 +23,16 @@ export default {
         return json({ geocode }, 200, cors);
       }
 
-      if (request.method !== "POST" || url.pathname !== "/api/places") {
+      const isPlacesRequest = request.method === "POST" && (url.pathname === "/api/places" || url.pathname === "/api/places/web");
+      if (!isPlacesRequest) {
         return json({ error: "Not found" }, 404, cors);
       }
 
       const body = await request.json();
+      const metadataMode = metadataModeForRequest(url, body);
       const placeUrl = normalizePlaceUrl(body.url);
       const page = await getPlacePage(placeUrl, env);
-      const metadata = await getMetadata(page, env);
+      const metadata = await resolveMetadata(page, env, metadataMode);
       const geocode = await getGeocode(metadata, env);
       const place = buildPlace(page, metadata, geocode);
 
@@ -108,6 +110,11 @@ function isBlockedHost(hostname) {
 
   if (host === "::1" || host.startsWith("[::1]")) return true;
   return false;
+}
+
+function metadataModeForRequest(url, body) {
+  const value = String(body.metadataMode || body.metadata || url.searchParams.get("metadata") || "").toLowerCase();
+  return url.pathname === "/api/places/web" || value === "web" ? "web" : "page";
 }
 
 async function fetchPlacePage(placeUrl) {
@@ -322,15 +329,52 @@ function googleSearchPage(requestedUrl, resolvedUrl, fallback) {
   };
 }
 
-async function getMetadata(page, env) {
+async function resolveMetadata(page, env, mode = "page") {
+  if (mode === "web" || !hasWebMetadataWorker(env)) {
+    return getMetadata(page, env, mode);
+  }
+
+  const [pageMetadata, webMetadata] = await Promise.all([
+    getMetadata(page, env, "page"),
+    getMetadata(page, env, "web")
+  ]);
+  return metadataScore(webMetadata) > metadataScore(pageMetadata) ? webMetadata : pageMetadata;
+}
+
+function hasWebMetadataWorker(env) {
+  return Boolean(env.METADATA_WEB?.fetch || env.METADATA_WEB_WORKER_URL);
+}
+
+function metadataScore(metadata) {
+  let score = 0;
+  const hasAddress = Boolean(metadata.address);
+  const hasCity = Boolean(metadata.city);
+
+  if (metadata.name) score += 1;
+  if (hasAddress) score += 6;
+  if (hasCity) score += 3;
+  if (metadata.country) score += 1;
+  if (metadata.type && metadata.type !== "Other") score += 1;
+  if (metadata.description) score += 1;
+  if (Array.isArray(metadata.tags) && metadata.tags.length) score += 1;
+  if (hasAddress && hasCity) score += 4;
+  if ((hasAddress || hasCity) && Number.isFinite(numberOrNull(metadata.lat)) && Number.isFinite(numberOrNull(metadata.lng))) score += 2;
+  if (metadata.isRelevantPlace === false) score -= 6;
+  return score;
+}
+
+async function getMetadata(page, env, mode = "page") {
   try {
-    return await askMetadataWorker(page, env);
+    return await askMetadataWorker(page, env, mode);
   } catch (error) {
-    return fallbackMetadata(page, messageFromError(error));
+    return fallbackMetadata(page, messageFromError(error), mode);
   }
 }
 
-async function askMetadataWorker(page, env) {
+async function askMetadataWorker(page, env, mode = "page") {
+  const binding = mode === "web" ? env.METADATA_WEB : env.METADATA;
+  const workerUrl = mode === "web" ? env.METADATA_WEB_WORKER_URL : env.METADATA_WORKER_URL;
+  const label = mode === "web" ? "Web metadata Worker" : "Metadata Worker";
   const request = new Request("https://metadata.local/metadata", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -339,30 +383,30 @@ async function askMetadataWorker(page, env) {
 
   let serviceBindingError = null;
 
-  if (env.METADATA?.fetch) {
+  if (binding?.fetch) {
     let response;
     try {
-      response = await env.METADATA.fetch(request);
+      response = await binding.fetch(request);
     } catch (error) {
       serviceBindingError = error;
     }
 
     if (response) {
       if (!response.ok) {
-        throw new Error(await responseError(response, "Metadata Worker failed"));
+        throw new Error(await responseError(response, `${label} failed`));
       }
       return response.json();
     }
   }
 
-  if (env.METADATA_WORKER_URL) {
-    const response = await fetch(new URL("/metadata", env.METADATA_WORKER_URL), {
+  if (workerUrl) {
+    const response = await fetch(new URL("/metadata", workerUrl), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(page)
     });
     if (!response.ok) {
-      throw new Error(await responseError(response, "Metadata Worker failed"));
+      throw new Error(await responseError(response, `${label} failed`));
     }
     return response.json();
   }
@@ -371,10 +415,10 @@ async function askMetadataWorker(page, env) {
     throw serviceBindingError;
   }
 
-  throw new Error("Metadata Worker is not configured");
+  throw new Error(`${label} is not configured`);
 }
 
-function fallbackMetadata(page, error) {
+function fallbackMetadata(page, error, mode = "page") {
   const description = page.description || summarize(page.text);
   return {
     name: page.title || titleFromUrl(new URL(page.url)),
@@ -386,6 +430,7 @@ function fallbackMetadata(page, error) {
     tags: inferTags(`${page.title} ${page.text}`),
     canonicalUrl: page.canonicalUrl || page.url,
     isRelevantPlace: false,
+    metadataMode: mode,
     status: "metadata_incomplete",
     error
   };
@@ -498,6 +543,7 @@ function buildPlace(page, metadata, geocode) {
     originalUrl: page.originalUrl || page.url,
     canonicalUrl: metadata.canonicalUrl || page.canonicalUrl || page.url,
     source: page.source,
+    metadataMode: metadata.metadataMode || "",
     name: displayName(metadata.name, geocode.name, page.title || titleFromUrl(new URL(page.url))),
     address,
     city,
