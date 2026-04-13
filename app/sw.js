@@ -17,7 +17,8 @@ const APP_SHELL = [
   "./api.js",
   "./place.js",
   "./storage.js",
-  "./manifest.webmanifest"
+  "./manifest.webmanifest",
+  "./icon.png"
 ];
 
 self.addEventListener("install", event => {
