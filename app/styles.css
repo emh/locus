@@ -654,14 +654,18 @@ header h1 {
 
 @media (max-width: 699px) {
   #map-container {
+    height: calc(38dvh + constant(safe-area-inset-top));
     height: calc(38dvh + env(safe-area-inset-top, 0px));
+    max-height: calc(380px + constant(safe-area-inset-top));
     max-height: calc(380px + env(safe-area-inset-top, 0px));
-    margin-top: calc(-1 * env(safe-area-inset-top, 0px));
+    margin-top: calc(0px - constant(safe-area-inset-top));
+    margin-top: calc(0px - env(safe-area-inset-top, 0px));
   }
 }
 
 @media (max-width: 699px) and (max-height: 600px) {
   #map-container {
+    height: calc(30dvh + constant(safe-area-inset-top));
     height: calc(30dvh + env(safe-area-inset-top, 0px));
   }
 }
