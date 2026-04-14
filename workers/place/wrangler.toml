@@ -10,5 +10,5 @@ services = [
 [vars]
 ALLOWED_ORIGINS = "http://localhost:8020,http://127.0.0.1:8020,https://emh.github.io,https://emh.io"
 MOCK_LLM = "false"
-OPENAI_MODEL = "gpt-5"
+OPENAI_MODEL = "gpt-5.4-nano"
 OPENAI_REASONING_EFFORT = "low"
