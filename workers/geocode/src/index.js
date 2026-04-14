@@ -176,11 +176,12 @@ function isCategoryMatch(type, result) {
   const category = String(result.category || "").toLowerCase();
   const resultType = String(result.type || "").toLowerCase();
 
-  if (wanted === "shop") return category === "shop" || ["books", "bookstore"].includes(resultType);
-  if (wanted === "restaurant") return category === "amenity" && ["restaurant", "cafe", "bar", "pub"].includes(resultType);
-  if (wanted === "bar") return category === "amenity" && ["bar", "pub"].includes(resultType);
-  if (wanted === "cafe") return category === "amenity" && resultType === "cafe";
-  if (wanted === "fitness") return ["leisure", "amenity"].includes(category) && ["fitness_centre", "sports_centre", "gym"].includes(resultType);
+  if (/\b(shop|store|bookstore|boutique)\b/.test(wanted)) return category === "shop" || ["books", "bookstore"].includes(resultType);
+  if (/\b(restaurant|diner|bistro|trattoria|pizzeria|sushi|ramen|taqueria)\b/.test(wanted)) return category === "amenity" && ["restaurant", "cafe", "bar", "pub"].includes(resultType);
+  if (/\b(bar|pub|cocktail|brewery|taproom)\b/.test(wanted)) return category === "amenity" && ["bar", "pub", "biergarten"].includes(resultType);
+  if (/\b(cafe|coffee|bakery|tea)\b/.test(wanted)) return category === "amenity" && ["cafe", "bakery"].includes(resultType);
+  if (/\b(fitness|gym|yoga|pilates)\b/.test(wanted)) return ["leisure", "amenity"].includes(category) && ["fitness_centre", "sports_centre", "gym"].includes(resultType);
+  if (/\b(museum|gallery)\b/.test(wanted)) return category === "tourism" && ["museum", "gallery"].includes(resultType);
 
   return false;
 }

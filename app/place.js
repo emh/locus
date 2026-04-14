@@ -49,8 +49,7 @@ function getDerivedStatus(place, lat, lng) {
 
 function normalizeType(type) {
   const text = stringOr(type, "Other");
-  if (text.length > 28 || /[&/]/.test(text)) return "Other";
-  return text;
+  return text.length > 80 ? text.slice(0, 80).trim() : text;
 }
 
 function normalizeTags(tags) {

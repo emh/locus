@@ -3,18 +3,14 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "concurrently -n web,place,metadata,metadata-web,geocode -c auto \"npm:dev:web\" \"npm:dev:worker:place\" \"npm:dev:worker:metadata\" \"npm:dev:worker:metadata-web\" \"npm:dev:worker:geocode\"",
+    "dev": "concurrently -n web,place,geocode -c auto \"npm:dev:web\" \"npm:dev:worker:place\" \"npm:dev:worker:geocode\"",
     "dev:web": "wds --root-dir app --watch --app-index index.html --hostname 127.0.0.1 --port 8020",
     "dev:worker:place": "WRANGLER_LOG_PATH=../../.wrangler/logs wrangler dev --cwd workers/place --config wrangler.toml --ip 127.0.0.1 --port 8797 --inspector-ip 127.0.0.1 --inspector-port 9240 --persist-to ../../.wrangler/state/place",
-    "dev:worker:metadata": "WRANGLER_LOG_PATH=../../.wrangler/logs wrangler dev --cwd workers/metadata --config wrangler.toml --ip 127.0.0.1 --port 8798 --inspector-ip 127.0.0.1 --inspector-port 9241 --persist-to ../../.wrangler/state/metadata",
-    "dev:worker:metadata-web": "WRANGLER_LOG_PATH=../../.wrangler/logs wrangler dev --cwd workers/metadata-web --config wrangler.toml --ip 127.0.0.1 --port 8800 --inspector-ip 127.0.0.1 --inspector-port 9243 --persist-to ../../.wrangler/state/metadata-web",
     "dev:worker:geocode": "WRANGLER_LOG_PATH=../../.wrangler/logs wrangler dev --cwd workers/geocode --config wrangler.toml --ip 127.0.0.1 --port 8799 --inspector-ip 127.0.0.1 --inspector-port 9242 --persist-to ../../.wrangler/state/geocode",
-    "deploy:worker:metadata": "wrangler deploy --config workers/metadata/wrangler.toml",
-    "deploy:worker:metadata-web": "wrangler deploy --config workers/metadata-web/wrangler.toml",
     "deploy:worker:geocode": "wrangler deploy --config workers/geocode/wrangler.toml",
     "deploy:worker:place": "wrangler deploy --config workers/place/wrangler.toml",
-    "deploy:workers": "npm run deploy:worker:metadata && npm run deploy:worker:metadata-web && npm run deploy:worker:geocode && npm run deploy:worker:place",
-    "check": "node --check app/config.js && node --check app/version.js && node --check app/sw.js && node --check app/place.js && node --check app/main.js && node --check app/api.js && node --check app/storage.js && node -e \"JSON.parse(require('node:fs').readFileSync('app/manifest.webmanifest', 'utf8'))\" && node --check workers/place/src/index.js && node --check workers/metadata/src/index.js && node --check workers/metadata-web/src/index.js && node --check workers/geocode/src/index.js"
+    "deploy:workers": "npm run deploy:worker:geocode && npm run deploy:worker:place",
+    "check": "node --check app/config.js && node --check app/version.js && node --check app/sw.js && node --check app/place.js && node --check app/main.js && node --check app/api.js && node --check app/storage.js && node -e \"JSON.parse(require('node:fs').readFileSync('app/manifest.webmanifest', 'utf8'))\" && node --check workers/place/src/index.js && node --check workers/geocode/src/index.js"
   },
   "devDependencies": {
     "@web/dev-server": "^0.4.6",

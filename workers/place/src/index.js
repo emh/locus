@@ -1,7 +1,4 @@
-const MAX_PAGE_BYTES = 2_000_000;
-const MAX_TEXT_CHARS = 40_000;
-const MAX_STRUCTURED_CHARS = 20_000;
-
+const DEFAULT_OPENAI_MODEL = "gpt-5";
 
 export default {
   async fetch(request, env) {
@@ -24,18 +21,15 @@ export default {
         return json({ geocode }, 200, cors);
       }
 
-      const isPlacesRequest = request.method === "POST" && (url.pathname === "/api/places" || url.pathname === "/api/places/web");
-      if (!isPlacesRequest) {
+      if (request.method !== "POST" || url.pathname !== "/api/places") {
         return json({ error: "Not found" }, 404, cors);
       }
 
       const body = await request.json();
-      const metadataMode = metadataModeForRequest(url, body);
       const placeUrl = normalizePlaceUrl(body.url);
-      const page = await getPlacePage(placeUrl, env);
-      const metadata = await resolveMetadata(page, env, metadataMode);
+      const metadata = await getMetadata(placeUrl, env);
       const geocode = await getGeocode(metadata, env);
-      const place = buildPlace(page, metadata, geocode);
+      const place = buildPlace(placeUrl, metadata, geocode);
 
       return json({ place }, 200, cors);
     } catch (error) {
@@ -113,325 +107,213 @@ function isBlockedHost(hostname) {
   return false;
 }
 
-function metadataModeForRequest(url, body) {
-  const value = String(body.metadataMode || body.metadata || url.searchParams.get("metadata") || "").toLowerCase();
-  return url.pathname === "/api/places/web" || value === "web" ? "web" : "page";
+async function getMetadata(placeUrl, env) {
+  const target = metadataTarget(placeUrl);
+
+  try {
+    if (env.MOCK_LLM === "true") {
+      return heuristicMetadata(target);
+    }
+
+    return await extractMetadataWithOpenAI(target, env);
+  } catch (error) {
+    return fallbackMetadata(target, messageFromError(error));
+  }
 }
 
-async function fetchPlacePage(placeUrl) {
-  const response = await fetch(placeUrl, {
-    headers: {
-      "Accept": "text/html,application/xhtml+xml,text/plain;q=0.8,*/*;q=0.1",
-      "User-Agent": "LocusBot/0.1 (+https://github.com)"
+async function extractMetadataWithOpenAI(target, env) {
+  const apiKey = stringOr(env.OPENAI_API_KEY, "");
+  if (!apiKey) {
+    throw new Error("OPENAI_API_KEY is required when MOCK_LLM is false");
+  }
+
+  const body = {
+    model: stringOr(env.OPENAI_MODEL, DEFAULT_OPENAI_MODEL),
+    input: [
+      {
+        role: "system",
+        content: systemPrompt()
+      },
+      {
+        role: "user",
+        content: userPrompt(target)
+      }
+    ],
+    tools: [
+      { type: "web_search" }
+    ],
+    tool_choice: "auto",
+    include: ["web_search_call.action.sources"],
+    text: {
+      format: {
+        type: "json_schema",
+        name: "place_metadata",
+        strict: true,
+        schema: metadataSchema()
+      }
     }
+  };
+
+  const reasoning = reasoningConfig(env);
+  if (reasoning) body.reasoning = reasoning;
+
+  const response = await fetch("https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${apiKey}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(body)
   });
 
   if (!response.ok) {
-    throw new Error(`Page returned ${response.status}`);
+    throw new Error(await openAIError(response, "OpenAI metadata request failed"));
   }
 
-  const contentType = response.headers.get("Content-Type") || "";
-  if (!/text\/html|application\/xhtml\+xml|text\/plain/i.test(contentType)) {
-    throw new Error("URL did not return a page-like document");
-  }
+  const payload = await response.json();
+  const outputText = getOutputText(payload);
+  if (!outputText) throw new Error("OpenAI returned no metadata text");
 
-  const contentLength = Number(response.headers.get("Content-Length"));
-  if (Number.isFinite(contentLength) && contentLength > MAX_PAGE_BYTES) {
-    throw new Error("Page is too large");
-  }
-
-  const html = await response.text();
-  if (html.length > MAX_PAGE_BYTES) {
-    throw new Error("Page is too large");
-  }
-
-  return extractPage(response.url || placeUrl, html, placeUrl);
+  const metadata = normalizeMetadata(JSON.parse(outputText), target);
+  const sources = extractSources(payload);
+  if (sources.length) metadata.sources = sources;
+  return metadata;
 }
 
-async function getPlacePage(placeUrl, env) {
-  try {
-    return await fetchPlacePage(placeUrl);
-  } catch (error) {
-    const directError = messageFromError(error);
-    const readerPage = await fetchReaderFallback(placeUrl, directError, env);
-    if (readerPage) return readerPage;
-
-    const fallback = fallbackPage(placeUrl, directError);
-    console.warn(`Page fetch failed for ${placeUrl}: ${fallback.fetchError}`);
-    return fallback;
-  }
+function systemPrompt() {
+  return [
+    "The user will provide the URL for a place they need metadata for.",
+    "Examine the supplied URL and determine the type of place it is, the name, the address, the lat/lng coordinates, a short description, and tags.",
+    "Use web search to open the exact supplied URL first, follow redirects, and resolve short links or map share links when needed.",
+    "If the URL is a share URL, search result, or interstitial, identify the intended place only when the URL or page clearly points to one physical place.",
+    "You may navigate further within the supplied website, especially contact, location, about, menu, hours, store, reservation, and booking pages.",
+    "Prefer the place's official website over aggregators or unrelated businesses with similar names.",
+    "If the page is not about one specific physical place, set isRelevantPlace to false and leave unknown fields empty.",
+    "Choose a concise place type yourself, for example restaurant, cocktail bar, museum, gym, bookstore, market, hotel, park, or music venue.",
+    "Put descriptive details in tags, not type. Do not invent missing facts.",
+    "Return structured output that exactly matches the schema."
+  ].join(" ");
 }
 
-async function fetchReaderFallback(placeUrl, directError, env) {
-  if (!env.READER_FALLBACK_URL) return null;
+function userPrompt(target) {
+  return [
+    `URL: ${target.url}`,
+    `Host hint: ${target.source}`,
+    "",
+    "Extract these fields:",
+    "- name: public place name",
+    "- address: street address, including unit or suite when available",
+    "- city: locality only, without state, province, postal code, or country",
+    "- country: full country name when known",
+    "- type: concise model-chosen place type",
+    "- description: one short factual description",
+    "- tags: short descriptive tags such as cuisine, atmosphere, specialty, collection, or activity",
+    "- canonicalUrl: official page URL for the place when known, otherwise the supplied URL",
+    "- lat and lng: decimal degrees as strings when confidently available",
+    "- isRelevantPlace: false unless the URL resolves to one specific physical place"
+  ].join("\n");
+}
 
-  try {
-    const readerUrl = `${env.READER_FALLBACK_URL.replace(/\/+$/, "")}/${placeUrl}`;
-    const response = await fetch(readerUrl, {
-      headers: {
-        "Accept": "text/plain, text/markdown;q=0.9, */*;q=0.1",
-        "User-Agent": "LocusBot/0.1 (+https://github.com)"
-      }
-    });
-
-    if (!response.ok) {
-      throw new Error(`Reader fallback returned ${response.status}`);
+function metadataSchema() {
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: ["name", "address", "city", "country", "type", "description", "tags", "canonicalUrl", "lat", "lng", "isRelevantPlace"],
+    properties: {
+      name: { type: "string" },
+      address: { type: "string" },
+      city: { type: "string" },
+      country: { type: "string" },
+      type: { type: "string" },
+      description: { type: "string" },
+      tags: {
+        type: "array",
+        maxItems: 8,
+        items: { type: "string" }
+      },
+      canonicalUrl: { type: "string" },
+      lat: { type: "string" },
+      lng: { type: "string" },
+      isRelevantPlace: { type: "boolean" }
     }
-
-    const markdown = await response.text();
-    if (!markdown.trim()) {
-      throw new Error("Reader fallback returned no content");
-    }
-
-    const page = extractReaderPage(placeUrl, markdown.slice(0, MAX_TEXT_CHARS));
-    page.fetchStatus = "reader_fallback";
-    page.fetchError = directError;
-    return page;
-  } catch (error) {
-    console.warn(`Reader fallback failed for ${placeUrl}: ${messageFromError(error)}`);
-    return null;
-  }
+  };
 }
 
-function extractReaderPage(placeUrl, markdown) {
-  const url = new URL(placeUrl);
-  const source = url.hostname.replace(/^www\./, "");
-  const title = getReaderField(markdown, "Title") || titleFromMarkdown(markdown) || titleFromUrl(url);
-  const sourceUrl = getReaderField(markdown, "URL Source") || placeUrl;
-  const content = markdown
-    .replace(/^Title:.*$/im, "")
-    .replace(/^URL Source:.*$/im, "")
-    .replace(/^Published Time:.*$/im, "")
-    .replace(/^Markdown Content:\s*$/im, "")
-    .trim();
-  const text = markdownToText(content);
+function reasoningConfig(env) {
+  const effort = stringOr(env.OPENAI_REASONING_EFFORT, "");
+  if (!effort) return null;
+  if (!["minimal", "low", "medium", "high"].includes(effort)) return null;
+  return { effort };
+}
 
+function metadataTarget(placeUrl) {
   return {
     url: placeUrl,
-    canonicalUrl: sourceUrl,
-    source,
-    siteName: source,
-    title,
-    description: "",
-    text,
-    structuredData: "",
-    wordCount: countWords(text)
+    source: sourceFromUrl(placeUrl)
   };
 }
 
-function getReaderField(markdown, field) {
-  const match = markdown.match(new RegExp(`^${escapeRegExp(field)}:\\s*(.+)$`, "im"));
-  return match?.[1]?.trim() || "";
-}
-
-function titleFromMarkdown(markdown) {
-  const match = markdown.match(/^#\s+(.+)$/m);
-  return match?.[1]?.replace(/\s+\|\s+.+$/, "").trim() || "";
-}
-
-function fallbackPage(placeUrl, fetchError) {
-  const url = new URL(placeUrl);
-  const source = url.hostname.replace(/^www\./, "");
-  const title = titleFromUrl(url) || `Place from ${source}`;
+function normalizeMetadata(metadata, target) {
+  const tags = Array.isArray(metadata.tags) ? metadata.tags : [];
+  const name = stringOr(metadata.name, titleFromUrl(target.url));
+  const address = stringOr(metadata.address, "");
+  const city = stringOr(metadata.city, "");
+  const lat = stringOr(metadata.lat, "");
+  const lng = stringOr(metadata.lng, "");
+  const type = cleanType(metadata.type);
+  const isRelevantPlace = typeof metadata.isRelevantPlace === "boolean"
+    ? metadata.isRelevantPlace
+    : Boolean(name && (address || city || (lat && lng) || type !== "Other"));
 
   return {
-    url: placeUrl,
-    canonicalUrl: placeUrl,
-    source,
-    siteName: source,
-    title,
-    description: "",
-    text: `${title}. Place metadata could not be extracted from ${source}.`,
-    structuredData: "",
-    wordCount: 0,
-    fetchStatus: "failed",
-    fetchError
+    name,
+    address,
+    city,
+    country: stringOr(metadata.country, ""),
+    type,
+    description: stringOr(metadata.description, ""),
+    tags: tags.map(tag => slugify(tag)).filter(Boolean).slice(0, 8),
+    canonicalUrl: stringOr(metadata.canonicalUrl, target.url),
+    lat,
+    lng,
+    isRelevantPlace,
+    status: isRelevantPlace && name && (address || city) ? "ready" : "metadata_incomplete",
+    error: ""
   };
 }
 
-function extractPage(placeUrl, html, requestedUrl = placeUrl) {
-  const url = new URL(placeUrl);
-  const googleFallback = extractGoogleSearchFallback(html, url);
-  if (isGoogleShareHandoff(requestedUrl, url) && googleFallback) {
-    return googleSearchPage(requestedUrl, url, googleFallback);
-  }
-
-  const source = url.hostname.replace(/^www\./, "");
-  const title = getMeta(html, ["og:title", "twitter:title"]) || getTitle(html) || titleFromUrl(url);
-  const description = getMeta(html, ["description", "og:description", "twitter:description"]);
-  const siteName = getMeta(html, ["og:site_name", "application-name"]) || source;
-  const canonicalUrl = getCanonicalUrl(html, url) || placeUrl;
-  const structuredData = extractStructuredData(html).slice(0, MAX_STRUCTURED_CHARS);
-  const text = htmlToText(html).slice(0, MAX_TEXT_CHARS);
-  const wordCount = countWords(text);
-
+function heuristicMetadata(target) {
+  const name = titleFromUrl(target.url);
   return {
-    url: placeUrl,
-    canonicalUrl,
-    originalUrl: requestedUrl,
-    source,
-    siteName,
-    title,
-    description,
-    text,
-    structuredData,
-    wordCount
-  };
-}
-
-function isGoogleShareHandoff(requestedUrl, resolvedUrl) {
-  const requested = safeUrl(requestedUrl);
-  return requested?.hostname === "share.google" ||
-    (resolvedUrl.hostname.endsWith("google.com") && resolvedUrl.pathname === "/share.google");
-}
-
-function extractGoogleSearchFallback(html, baseUrl) {
-  const matches = html.matchAll(/href=["']([^"']*\/search\?[^"']*?q=[^"']+)["']/gi);
-
-  for (const match of matches) {
-    try {
-      const url = new URL(decodeEntities(match[1]), baseUrl);
-      const query = url.searchParams.get("q") || "";
-      if (query.trim()) {
-        return {
-          url: googleSearchUrl(query.trim()),
-          query: query.trim()
-        };
-      }
-    } catch {
-      // Keep looking for a usable search fallback.
-    }
-  }
-
-  return null;
-}
-
-function googleSearchUrl(query) {
-  const url = new URL("https://www.google.com/search");
-  url.searchParams.set("q", query);
-  return url;
-}
-
-function googleSearchPage(requestedUrl, resolvedUrl, fallback) {
-  const title = fallback.query;
-  return {
-    url: fallback.url.toString(),
-    canonicalUrl: fallback.url.toString(),
-    originalUrl: requestedUrl,
-    source: resolvedUrl.hostname.replace(/^www\./, ""),
-    siteName: "Google Search",
-    title,
-    description: `Google shared search: ${title}`,
-    text: title,
-    structuredData: "",
-    searchQuery: title,
-    wordCount: countWords(title),
-    fetchStatus: "google_search_fallback"
-  };
-}
-
-async function resolveMetadata(page, env, mode = "page") {
-  if (mode === "web" || !hasWebMetadataWorker(env)) {
-    return getMetadata(page, env, mode);
-  }
-
-  const [pageMetadata, webMetadata] = await Promise.all([
-    getMetadata(page, env, "page"),
-    getMetadata(page, env, "web")
-  ]);
-  return metadataScore(webMetadata) > metadataScore(pageMetadata) ? webMetadata : pageMetadata;
-}
-
-function hasWebMetadataWorker(env) {
-  return Boolean(env.METADATA_WEB?.fetch || env.METADATA_WEB_WORKER_URL);
-}
-
-function metadataScore(metadata) {
-  let score = 0;
-  const hasAddress = Boolean(metadata.address);
-  const hasCity = Boolean(metadata.city);
-
-  if (metadata.name) score += 1;
-  if (hasAddress) score += 6;
-  if (hasCity) score += 3;
-  if (metadata.country) score += 1;
-  if (metadata.type && metadata.type !== "Other") score += 1;
-  if (metadata.description) score += 1;
-  if (Array.isArray(metadata.tags) && metadata.tags.length) score += 1;
-  if (hasAddress && hasCity) score += 4;
-  if ((hasAddress || hasCity) && Number.isFinite(numberOrNull(metadata.lat)) && Number.isFinite(numberOrNull(metadata.lng))) score += 2;
-  if (metadata.isRelevantPlace === false) score -= 6;
-  return score;
-}
-
-async function getMetadata(page, env, mode = "page") {
-  try {
-    return await askMetadataWorker(page, env, mode);
-  } catch (error) {
-    return fallbackMetadata(page, messageFromError(error), mode);
-  }
-}
-
-async function askMetadataWorker(page, env, mode = "page") {
-  const binding = mode === "web" ? env.METADATA_WEB : env.METADATA;
-  const workerUrl = mode === "web" ? env.METADATA_WEB_WORKER_URL : env.METADATA_WORKER_URL;
-  const label = mode === "web" ? "Web metadata Worker" : "Metadata Worker";
-  const request = new Request("https://metadata.local/metadata", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(page)
-  });
-
-  let serviceBindingError = null;
-
-  if (binding?.fetch) {
-    let response;
-    try {
-      response = await binding.fetch(request);
-    } catch (error) {
-      serviceBindingError = error;
-    }
-
-    if (response) {
-      if (!response.ok) {
-        throw new Error(await responseError(response, `${label} failed`));
-      }
-      return response.json();
-    }
-  }
-
-  if (workerUrl) {
-    const response = await fetch(new URL("/metadata", workerUrl), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(page)
-    });
-    if (!response.ok) {
-      throw new Error(await responseError(response, `${label} failed`));
-    }
-    return response.json();
-  }
-
-  if (serviceBindingError) {
-    throw serviceBindingError;
-  }
-
-  throw new Error(`${label} is not configured`);
-}
-
-function fallbackMetadata(page, error, mode = "page") {
-  const description = page.description || summarize(page.text);
-  return {
-    name: page.title || titleFromUrl(new URL(page.url)),
+    name,
     address: "",
     city: "",
     country: "",
     type: "Other",
-    description,
-    tags: inferTags(`${page.title} ${page.text}`),
-    canonicalUrl: page.canonicalUrl || page.url,
+    description: "",
+    tags: [],
+    canonicalUrl: target.url,
+    lat: "",
+    lng: "",
     isRelevantPlace: false,
-    metadataMode: mode,
+    status: "metadata_incomplete",
+    error: ""
+  };
+}
+
+function fallbackMetadata(target, error) {
+  return {
+    name: titleFromUrl(target.url),
+    address: "",
+    city: "",
+    country: "",
+    type: "Other",
+    description: "",
+    tags: [],
+    canonicalUrl: target.url,
+    lat: "",
+    lng: "",
+    isRelevantPlace: false,
     status: "metadata_incomplete",
     error
   };
@@ -511,46 +393,36 @@ async function askGeocodeWorker(metadata, env) {
   throw new Error("Geocode Worker is not configured");
 }
 
-async function responseError(response, fallback) {
-  try {
-    const payload = await response.json();
-    if (typeof payload.error === "string" && payload.error) {
-      return payload.error;
-    }
-  } catch {
-    // Fall through to status text.
-  }
-
-  return `${fallback}: ${response.status}`;
-}
-
-function buildPlace(page, metadata, geocode) {
+function buildPlace(placeUrl, metadata, geocode) {
   const metadataLat = numberOrNull(metadata.lat);
   const metadataLng = numberOrNull(metadata.lng);
-  const lat = numberOrNull(geocode.lat) ?? metadataLat;
-  const lng = numberOrNull(geocode.lng) ?? metadataLng;
+  const geocodeLat = numberOrNull(geocode.lat);
+  const geocodeLng = numberOrNull(geocode.lng);
+  const lat = geocodeLat ?? metadataLat;
+  const lng = geocodeLng ?? metadataLng;
   const address = metadata.address || geocode.displayAddress || "";
   const city = metadata.city || geocode.city || "";
   const country = countryName(metadata.country) || geocode.country || "";
+  const name = displayName(metadata.name, geocode.name, titleFromUrl(placeUrl));
   const geocodeStatus = geocode.status === "ready"
     ? "ready"
     : Number.isFinite(metadataLat) && Number.isFinite(metadataLng) ? "metadata" : geocode.status || "not_found";
-  const status = deriveStatus(metadata, geocodeStatus, { address, city, lat, lng });
-  const error = [page.fetchError, metadata.error, geocode.error].filter(Boolean).join("; ");
+  const status = deriveStatus(metadata, geocodeStatus, { name, address, city, lat, lng });
+  const error = [metadata.error, geocode.error].filter(Boolean).join("; ");
+  const canonicalUrl = metadata.canonicalUrl || placeUrl;
 
   return {
     id: crypto.randomUUID(),
-    url: page.url,
-    originalUrl: page.originalUrl || page.url,
-    canonicalUrl: metadata.canonicalUrl || page.canonicalUrl || page.url,
-    source: page.source,
-    metadataMode: metadata.metadataMode || "",
-    name: displayName(metadata.name, geocode.name, page.title || titleFromUrl(new URL(page.url))),
+    url: placeUrl,
+    originalUrl: placeUrl,
+    canonicalUrl,
+    source: sourceFromUrl(canonicalUrl || placeUrl),
+    name,
     address,
     city,
     country,
     type: metadata.type || "Other",
-    description: metadata.description || page.description || summarize(page.text),
+    description: metadata.description || "",
     tags: Array.isArray(metadata.tags) ? metadata.tags.slice(0, 8) : [],
     lat,
     lng,
@@ -570,11 +442,11 @@ function displayName(metadataName, geocodeName, fallback) {
 }
 
 function deriveStatus(metadata, geocodeStatus, fields) {
-  if (metadata.status === "metadata_incomplete" || metadata.isRelevantPlace === false) {
+  if (metadata.isRelevantPlace === false) {
     return "metadata_incomplete";
   }
 
-  if (!fields.address || !fields.city) {
+  if (!fields.name || !fields.address || !fields.city) {
     return "metadata_incomplete";
   }
 
@@ -585,148 +457,33 @@ function deriveStatus(metadata, geocodeStatus, fields) {
   return "ready";
 }
 
-function getMeta(html, names) {
-  for (const name of names) {
-    const pattern = new RegExp(`<meta\\s+[^>]*(?:name|property)=["']${escapeRegExp(name)}["'][^>]*content=["']([^"']+)["'][^>]*>`, "i");
-    const reversePattern = new RegExp(`<meta\\s+[^>]*content=["']([^"']+)["'][^>]*(?:name|property)=["']${escapeRegExp(name)}["'][^>]*>`, "i");
-    const match = html.match(pattern) || html.match(reversePattern);
-    if (match?.[1]) return decodeEntities(match[1].trim());
-  }
-  return "";
+function cleanType(type) {
+  const text = String(type || "").trim().replace(/\s+/g, " ");
+  if (!text) return "Other";
+  return text.length > 80 ? text.slice(0, 80).trim() : text;
 }
 
-function getTitle(html) {
-  const match = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
-  return match?.[1] ? decodeEntities(match[1].replace(/\s+/g, " ").trim()) : "";
-}
-
-function getCanonicalUrl(html, baseUrl) {
-  const match = html.match(/<link\s+[^>]*rel=["']canonical["'][^>]*href=["']([^"']+)["'][^>]*>/i) ||
-    html.match(/<link\s+[^>]*href=["']([^"']+)["'][^>]*rel=["']canonical["'][^>]*>/i);
-  if (!match?.[1]) return "";
+function sourceFromUrl(input) {
   try {
-    return new URL(decodeEntities(match[1]), baseUrl).toString();
+    return new URL(input).hostname.replace(/^www\./, "");
   } catch {
-    return "";
+    return "place";
   }
 }
 
-function extractStructuredData(html) {
-  const chunks = [];
-  const pattern = /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
-  let match = pattern.exec(html);
-  while (match) {
-    if (match[1]?.trim()) {
-      chunks.push(decodeEntities(match[1].replace(/<[^>]*>/g, " ").trim()));
-    }
-    match = pattern.exec(html);
-  }
-
-  const squarespaceLocation = extractSquarespaceLocation(html);
-  if (squarespaceLocation) {
-    chunks.push(JSON.stringify(squarespaceLocation));
-  }
-
-  return chunks.join("\n\n");
-}
-
-function extractSquarespaceLocation(html) {
-  const marker = "Static.SQUARESPACE_CONTEXT";
-  const markerIndex = html.indexOf(marker);
-  if (markerIndex < 0) return null;
-
-  const assignmentIndex = html.indexOf("=", markerIndex);
-  if (assignmentIndex < 0) return null;
-
-  const start = html.indexOf("{", assignmentIndex);
-  if (start < 0) return null;
-
-  const raw = readJsonObject(html, start);
-  if (!raw) return null;
-
+function titleFromUrl(input) {
   try {
-    const context = JSON.parse(raw);
-    const website = context.website || {};
-    const location = website.location || {};
-    if (!location.addressLine1 && !location.addressLine2 && !location.markerLat && !location.markerLng) return null;
-
-    const parsedLine2 = parseAddressLine2(location.addressLine2);
-    const country = location.addressCountry || countryName(context.websiteSettings?.country) || "";
-
-    return {
-      "@type": "LocalBusiness",
-      "name": location.addressTitle || website.siteTitle || website.siteName || "",
-      "description": website.siteDescription || "",
-      "address": {
-        "@type": "PostalAddress",
-        "streetAddress": location.addressLine1 || "",
-        "addressLocality": parsedLine2.city,
-        "addressRegion": parsedLine2.region,
-        "postalCode": parsedLine2.postalCode,
-        "addressCountry": country
-      },
-      "geo": {
-        "@type": "GeoCoordinates",
-        "latitude": location.markerLat ?? location.mapLat ?? "",
-        "longitude": location.markerLng ?? location.mapLng ?? ""
-      }
-    };
+    const url = new URL(input);
+    const slug = url.pathname.split("/").filter(Boolean).pop() || url.hostname;
+    return slug
+      .replace(/\.[a-z0-9]+$/i, "")
+      .split(/[-_]+/g)
+      .filter(Boolean)
+      .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+      .join(" ");
   } catch {
-    return null;
+    return "Untitled place";
   }
-}
-
-function readJsonObject(text, start) {
-  let depth = 0;
-  let inString = false;
-  let quote = "";
-  let escaped = false;
-
-  for (let index = start; index < text.length; index += 1) {
-    const char = text[index];
-
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-
-    if (inString) {
-      if (char === "\\") {
-        escaped = true;
-      } else if (char === quote) {
-        inString = false;
-      }
-      continue;
-    }
-
-    if (char === "\"" || char === "'") {
-      inString = true;
-      quote = char;
-      continue;
-    }
-
-    if (char === "{") {
-      depth += 1;
-    } else if (char === "}") {
-      depth -= 1;
-      if (depth === 0) return text.slice(start, index + 1);
-    }
-  }
-
-  return "";
-}
-
-function parseAddressLine2(value) {
-  const parts = String(value || "")
-    .split(",")
-    .map(part => part.trim())
-    .filter(Boolean);
-
-  return {
-    city: parts[0] || "",
-    region: parts[1] || "",
-    postalCode: parts.slice(2).join(", ")
-  };
 }
 
 function countryName(code) {
@@ -740,96 +497,16 @@ function countryName(code) {
   return countries[text.toUpperCase()] || text;
 }
 
-function htmlToText(html) {
-  return decodeEntities(html)
-    .replace(/<script[\s\S]*?<\/script>/gi, " ")
-    .replace(/<style[\s\S]*?<\/style>/gi, " ")
-    .replace(/<noscript[\s\S]*?<\/noscript>/gi, " ")
-    .replace(/<svg[\s\S]*?<\/svg>/gi, " ")
-    .replace(/<(?:p|br|li|h[1-6]|div|section|article|blockquote|tr|address)\b[^>]*>/gi, "\n")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/[ \t]+\n/g, "\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .replace(/[ \t]{2,}/g, " ")
-    .trim();
-}
-
-function markdownToText(markdown) {
-  return decodeEntities(markdown)
-    .replace(/^#{2,}\s+.*$/gm, " ")
-    .replace(/```[\s\S]*?```/g, " ")
-    .replace(/\\([\\`*_{}\[\]()#+\-.!])/g, "$1")
-    .replace(/!\[[^\]]*]\([^)]+\)/g, " ")
-    .replace(/\[([^\]]+)]\([^)]+\)/g, "$1")
-    .replace(/[#>*_`~|-]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function decodeEntities(value) {
-  return String(value)
-    .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, "\"")
-    .replace(/&#39;/g, "'")
-    .replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code)))
-    .replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCodePoint(parseInt(code, 16)));
-}
-
-function safeUrl(input) {
-  try {
-    return new URL(input);
-  } catch {
-    return null;
-  }
-}
-
-function titleFromUrl(url) {
-  const slug = url.pathname.split("/").filter(Boolean).pop() || url.hostname;
-  return slug
-    .replace(/\.[a-z0-9]+$/i, "")
-    .split(/[-_]+/g)
-    .filter(Boolean)
-    .map(word => word.charAt(0).toUpperCase() + word.slice(1))
-    .join(" ");
-}
-
-function summarize(text) {
-  const sentences = String(text || "")
-    .replace(/\s+/g, " ")
-    .split(/(?<=[.!?])\s+/)
-    .filter(sentence => sentence.length > 40);
-
-  return sentences.slice(0, 2).join(" ").slice(0, 700) || "";
-}
-
-function inferTags(text) {
-  const stop = new Set(["about", "after", "again", "also", "because", "before", "being", "between", "could", "every", "first", "from", "have", "into", "more", "most", "other", "over", "some", "than", "that", "their", "there", "these", "this", "through", "what", "when", "where", "which", "while", "with", "would"]);
-  const counts = new Map();
-  const words = String(text).toLowerCase().match(/[a-z][a-z-]{3,}/g) || [];
-
-  for (const word of words) {
-    if (stop.has(word)) continue;
-    counts.set(word, (counts.get(word) || 0) + 1);
-  }
-
-  return Array.from(counts)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 5)
-    .map(([word]) => slugify(word))
-    .filter(Boolean);
-}
-
 function numberOrNull(value) {
   if (value == null || String(value).trim() === "") return null;
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
 }
 
-function countWords(text) {
-  return (String(text || "").match(/\S+/g) || []).length;
+function stringOr(value, fallback) {
+  if (value == null) return fallback;
+  const text = String(value).trim();
+  return text ? text : fallback;
 }
 
 function slugify(value) {
@@ -840,7 +517,74 @@ function slugify(value) {
     .replace(/^-+|-+$/g, "");
 }
 
-function json(payload, status, headers) {
+function getOutputText(payload) {
+  if (typeof payload.output_text === "string") return payload.output_text;
+
+  const chunks = [];
+  for (const item of payload.output || []) {
+    for (const content of item.content || []) {
+      if (typeof content.text === "string") chunks.push(content.text);
+    }
+  }
+
+  return chunks.join("");
+}
+
+function extractSources(payload) {
+  const sources = new Map();
+
+  for (const item of payload.output || []) {
+    const actionSources = item.action?.sources || [];
+    for (const source of actionSources) addSource(sources, source);
+
+    for (const content of item.content || []) {
+      const annotations = content.annotations || [];
+      for (const annotation of annotations) {
+        if (annotation.type === "url_citation") addSource(sources, annotation);
+      }
+    }
+  }
+
+  return Array.from(sources.values()).slice(0, 20);
+}
+
+function addSource(sources, source) {
+  const url = stringOr(source.url, "");
+  if (!url || sources.has(url)) return;
+  sources.set(url, {
+    url,
+    title: stringOr(source.title, "")
+  });
+}
+
+async function openAIError(response, fallback) {
+  try {
+    const payload = await response.json();
+    const message = payload?.error?.message || payload?.error || payload?.message;
+    if (typeof message === "string" && message) {
+      return `${fallback}: ${message}`;
+    }
+  } catch {
+    // Fall through to status text.
+  }
+
+  return `${fallback}: ${response.status}`;
+}
+
+async function responseError(response, fallback) {
+  try {
+    const payload = await response.json();
+    if (typeof payload.error === "string" && payload.error) {
+      return payload.error;
+    }
+  } catch {
+    // Fall through to status text.
+  }
+
+  return `${fallback}: ${response.status}`;
+}
+
+function json(payload, status, headers = {}) {
   return new Response(JSON.stringify(payload), {
     status,
     headers: {
@@ -852,8 +596,4 @@ function json(payload, status, headers) {
 
 function messageFromError(error) {
   return error instanceof Error ? error.message : "Request failed";
-}
-
-function escapeRegExp(value) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
