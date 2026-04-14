@@ -26,7 +26,7 @@ The frontend stores saved places in `localStorage` under `locus_v1`.
 
 ## Workers
 
-- `workers/place/` is the public API Worker. It sends the submitted URL to an OpenAI model with structured output and the `web_search` tool, extracts `name`, `address`, `city`, `country`, a model-chosen `type`, `description`, `tags`, optional coordinates, and relevance status, then asks the geocode Worker for coordinates only when the model did not return usable lat/lng values. It also exposes `/api/geocode` so manual address edits can be geocoded without making the geocode Worker public.
+- `workers/place/` is the public API Worker. It sends the submitted URL to an OpenAI model with structured output and the `web_search` tool, extracts `name`, `address`, `city`, `state`, `country`, a model-chosen `type`, `description`, `tags`, canonical URL, optional coordinates, and relevance status, then asks the geocode Worker for coordinates only when the model did not return usable lat/lng values. It also exposes `/api/geocode` so manual address edits can be geocoded without making the geocode Worker public.
 - `workers/geocode/` is the Nominatim Worker. It geocodes a normalized place query and caches results at the Worker boundary.
 
 Test the ingest path locally with:

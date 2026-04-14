@@ -62,8 +62,16 @@ function toast(message) {
   toastTimer = setTimeout(() => el.classList.remove("visible"), 2000);
 }
 
-function cityLabel(place) {
-  return place.city || "Unknown";
+function cityLabel(place, places = state.places) {
+  const city = place.city || "";
+  if (!city) return "Unknown";
+
+  const states = new Set(places
+    .filter(candidate => candidate.city === city)
+    .map(candidate => candidate.state || "")
+  );
+
+  return states.size > 1 && place.state ? `${city}, ${place.state}` : city;
 }
 
 function locationLabel(place) {
@@ -72,6 +80,7 @@ function locationLabel(place) {
 
   if (address) parts.push(address);
   if (place.city && !includesText(address, place.city)) parts.push(place.city);
+  if (place.state && !includesText(address, place.state)) parts.push(place.state);
   if (place.country && !includesText(address, place.country)) parts.push(place.country);
 
   return parts.filter(Boolean).join(", ") || "Address needed";
@@ -181,7 +190,7 @@ function unhighlightMarker(id) {
 
 function renderStats() {
   const total = state.places.length;
-  const cities = new Set(state.places.filter(place => place.city).map(place => place.city)).size;
+  const cities = new Set(state.places.filter(place => place.city).map(place => cityLabel(place))).size;
   const review = state.places.filter(placeNeedsReview).length;
   const suffix = review ? ` - ${review} need details` : "";
   $("stats").textContent = `${total} places - ${cities} cities${suffix}`;
@@ -193,7 +202,7 @@ function getTypes() {
 }
 
 function getCities() {
-  const cities = new Set(state.places.map(cityLabel));
+  const cities = new Set(state.places.map(place => cityLabel(place)));
   return ["All", ...Array.from(cities).sort((a, b) => a.localeCompare(b))];
 }
 
@@ -232,6 +241,7 @@ function getFiltered() {
       place.source.toLowerCase().includes(query) ||
       place.address.toLowerCase().includes(query) ||
       place.city.toLowerCase().includes(query) ||
+      place.state.toLowerCase().includes(query) ||
       place.country.toLowerCase().includes(query) ||
       place.type.toLowerCase().includes(query) ||
       place.description.toLowerCase().includes(query) ||
@@ -293,7 +303,7 @@ function renderPlaces() {
 function getNearby(place) {
   if (!place.city) return [];
   return state.places
-    .filter(candidate => candidate.id !== place.id && candidate.city === place.city)
+    .filter(candidate => candidate.id !== place.id && candidate.city === place.city && candidate.state === place.state)
     .slice(0, 4);
 }
 
@@ -336,7 +346,7 @@ function renderDetail(place) {
 
     <div class="detail-actions">
       <button class="action-link" data-action="edit" type="button">Edit</button>
-      <a class="action-link muted" href="${esc(place.url)}" target="_blank" rel="noopener">Website</a>
+      <a class="action-link muted" href="${esc(place.canonicalUrl || place.url)}" target="_blank" rel="noopener">Website</a>
       ${renderDeleteAction(place)}
     </div>
   `;
@@ -417,10 +427,15 @@ function renderEditForm(place) {
           <input name="type" value="${esc(place.type)}" autocomplete="off">
         </label>
         <label class="field">
-          <span>City</span>
-          <input name="city" value="${esc(place.city)}" autocomplete="off">
+          <span>Tags</span>
+          <input name="tags" value="${esc(place.tags.join(", "))}" autocomplete="off">
         </label>
       </div>
+
+      <label class="field">
+        <span>Description</span>
+        <textarea name="description">${esc(place.description)}</textarea>
+      </label>
 
       <label class="field">
         <span>Address</span>
@@ -429,14 +444,19 @@ function renderEditForm(place) {
 
       <div class="field-row">
         <label class="field">
-          <span>Country</span>
-          <input name="country" value="${esc(place.country)}" autocomplete="country-name">
+          <span>City</span>
+          <input name="city" value="${esc(place.city)}" autocomplete="address-level2">
         </label>
         <label class="field">
-          <span>Tags</span>
-          <input name="tags" value="${esc(place.tags.join(", "))}" autocomplete="off">
+          <span>State</span>
+          <input name="state" value="${esc(place.state)}" autocomplete="address-level1">
         </label>
       </div>
+
+      <label class="field">
+        <span>Country</span>
+        <input name="country" value="${esc(place.country)}" autocomplete="country-name">
+      </label>
 
       <div class="field-row">
         <label class="field">
@@ -448,11 +468,6 @@ function renderEditForm(place) {
           <input name="lng" inputmode="decimal" value="${hasCoordinates(place) ? esc(place.lng) : ""}" autocomplete="off">
         </label>
       </div>
-
-      <label class="field">
-        <span>Description</span>
-        <textarea name="description">${esc(place.description)}</textarea>
-      </label>
 
       <label class="field">
         <span>Notes</span>
@@ -518,6 +533,7 @@ async function saveEditForm(form) {
     type: formString(data, "type") || "Other",
     address: formString(data, "address"),
     city: formString(data, "city"),
+    state: formString(data, "state"),
     country: formString(data, "country"),
     tags: parseTags(formString(data, "tags")),
     lat: formNumber(data, "lat"),
@@ -558,6 +574,7 @@ async function geocodeIfNeeded(place) {
       lng: geocode.lng ?? place.lng,
       address: place.address || geocode.displayAddress || "",
       city: place.city || geocode.city || "",
+      state: place.state || geocode.state || "",
       country: place.country || geocode.country || "",
       osmId: geocode.osmId || "",
       osmType: geocode.osmType || "",
@@ -672,12 +689,6 @@ async function addPlace(url) {
     toast("Could not add place");
   } finally {
     progress.classList.remove("running");
-    progress.style.transition = "none";
-    progress.style.width = "0";
-    requestAnimationFrame(() => {
-      progress.style.transition = "";
-      progress.style.width = "";
-    });
     if (addedPlace) {
       status.textContent = "";
       status.classList.remove("is-error");

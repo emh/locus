@@ -13,6 +13,7 @@ export function normalizePlace(place) {
     name: stringOr(place.name, titleFromUrl(place.url, source)),
     address: stringOr(place.address, ""),
     city: stringOr(place.city, ""),
+    state: stringOr(place.state, ""),
     country: stringOr(place.country, ""),
     type: normalizeType(place.type),
     tags: normalizeTags(place.tags),

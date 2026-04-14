@@ -68,6 +68,7 @@ function buildQueries(place) {
   const hasLocationHint = [
     place.address,
     place.city,
+    place.state,
     place.country
   ].some(value => String(value || "").trim());
 
@@ -75,13 +76,19 @@ function buildQueries(place) {
 
   const name = cleanPlaceName(place.name);
   const address = String(place.address || "").trim();
+  const simpleAddress = simplifyAddress(address);
   const city = String(place.city || "").trim();
+  const state = String(place.state || "").trim();
   const country = normalizeCountry(String(place.country || "").trim());
   const queries = [];
 
-  addQuery(queries, [name, address, city, country]);
-  if (address) addQuery(queries, [address, city, country]);
-  if (name && city) addQuery(queries, [name, city, country]);
+  addQuery(queries, [name, address, city, state, country]);
+  if (address) addQuery(queries, [address, city, state, country]);
+  if (simpleAddress && simpleAddress !== address) {
+    addQuery(queries, [name, simpleAddress, city, state, country]);
+    addQuery(queries, [simpleAddress, city, state, country]);
+  }
+  if (name && city) addQuery(queries, [name, city, state, country]);
 
   return queries;
 }
@@ -96,6 +103,16 @@ function cleanPlaceName(name) {
   const pipeParts = text.split(/\s+\|\s+/).map(part => part.trim()).filter(Boolean);
   if (pipeParts.length > 1) return pipeParts[pipeParts.length - 1];
   return text;
+}
+
+function simplifyAddress(address) {
+  return String(address || "")
+    .replace(/\([^)]*(?:entre|between)[^)]*\)/gi, " ")
+    .replace(/\b(?:entre|between)\b.+$/i, " ")
+    .replace(/#\s*/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/\s+,/g, ",")
+    .trim();
 }
 
 function normalizeCountry(country) {
@@ -144,6 +161,7 @@ function scoreResult(result, place, query) {
   score += tokenOverlap(queryText, resultText) * 2;
 
   if (sameText(result.address?.city || result.address?.town || result.address?.village, place.city)) score += 3;
+  if (sameText(result.address?.state || result.address?.region || result.address?.province, place.state)) score += 2;
   if (sameText(result.address?.country, normalizeCountry(place.country || ""))) score += 2;
   if (isCategoryMatch(place.type, result)) score += 4;
 
@@ -212,6 +230,7 @@ function normalizeResult(result) {
     lng,
     displayAddress: result.display_name || "",
     city: address.city || address.town || address.village || address.hamlet || address.municipality || "",
+    state: address.state || address.region || address.province || "",
     country: address.country || "",
     osmId: result.osm_id ? String(result.osm_id) : "",
     osmType: result.osm_type || "",

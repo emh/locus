@@ -46,6 +46,7 @@ export async function geocodePlace(place, settings = loadSettings()) {
       name: place.name,
       address: place.address,
       city: place.city,
+      state: place.state,
       country: place.country,
       type: place.type
     })

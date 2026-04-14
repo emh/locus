@@ -108,7 +108,7 @@ function isBlockedHost(hostname) {
 }
 
 async function getMetadata(placeUrl, env) {
-  const target = metadataTarget(placeUrl);
+  const target = await metadataTarget(placeUrl);
 
   try {
     if (env.MOCK_LLM === "true") {
@@ -185,10 +185,16 @@ function systemPrompt() {
     "The user will provide the URL for a place they need metadata for.",
     "Examine the supplied URL and determine the type of place it is, the name, the address, the lat/lng coordinates, a short description, and tags.",
     "Use web search to open the exact supplied URL first, follow redirects, and resolve short links or map share links when needed.",
+    "If a search query hint is supplied, treat it as the intended place query from the share link and use it to search for the exact place.",
+    "For Google Maps or share.google links, prefer the Google Maps place result's displayed address and coordinates when available.",
     "If the URL is a share URL, search result, or interstitial, identify the intended place only when the URL or page clearly points to one physical place.",
     "You may navigate further within the supplied website, especially contact, location, about, menu, hours, store, reservation, and booking pages.",
-    "Prefer the place's official website over aggregators or unrelated businesses with similar names.",
+    "For canonicalUrl, find the place's actual official website URL when available. For Google Maps or share.google URLs, do not return the Google share URL as canonicalUrl unless no better official website can be determined.",
+    "Prefer the place's official website over aggregators, social profiles, map listings, or unrelated businesses with similar names.",
+    "If no official website URL can be determined, use the supplied URL as canonicalUrl.",
     "If the page is not about one specific physical place, set isRelevantPlace to false and leave unknown fields empty.",
+    "For address, return a complete display address, preserving enough detail to identify the right city, state/province, postal code, and country when available.",
+    "Actively look for exact decimal lat/lng coordinates on the official site, map pages, or search results; leave them empty only when you cannot verify them.",
     "Choose a concise place type yourself, for example restaurant, cocktail bar, museum, gym, bookstore, market, hotel, park, or music venue.",
     "Put descriptive details in tags, not type. Do not invent missing facts.",
     "Return structured output that exactly matches the schema."
@@ -198,18 +204,21 @@ function systemPrompt() {
 function userPrompt(target) {
   return [
     `URL: ${target.url}`,
+    `Resolved URL hint: ${target.resolvedUrl}`,
+    `Search query hint: ${target.searchQuery}`,
     `Host hint: ${target.source}`,
     "",
     "Extract these fields:",
     "- name: public place name",
-    "- address: street address, including unit or suite when available",
+    "- address: full display address, including unit or suite, cross-streets, neighborhood, postal code, state/province, and country when available",
     "- city: locality only, without state, province, postal code, or country",
+    "- state: state, province, prefecture, region, or equivalent administrative area when available",
     "- country: full country name when known",
     "- type: concise model-chosen place type",
     "- description: one short factual description",
     "- tags: short descriptive tags such as cuisine, atmosphere, specialty, collection, or activity",
-    "- canonicalUrl: official page URL for the place when known, otherwise the supplied URL",
-    "- lat and lng: decimal degrees as strings when confidently available",
+    "- canonicalUrl: official website URL for the place when known, otherwise the supplied URL",
+    "- lat and lng: exact decimal degrees as strings; search for them and leave empty only if not verified",
     "- isRelevantPlace: false unless the URL resolves to one specific physical place"
   ].join("\n");
 }
@@ -218,11 +227,12 @@ function metadataSchema() {
   return {
     type: "object",
     additionalProperties: false,
-    required: ["name", "address", "city", "country", "type", "description", "tags", "canonicalUrl", "lat", "lng", "isRelevantPlace"],
+    required: ["name", "address", "city", "state", "country", "type", "description", "tags", "canonicalUrl", "lat", "lng", "isRelevantPlace"],
     properties: {
       name: { type: "string" },
       address: { type: "string" },
       city: { type: "string" },
+      state: { type: "string" },
       country: { type: "string" },
       type: { type: "string" },
       description: { type: "string" },
@@ -246,11 +256,66 @@ function reasoningConfig(env) {
   return { effort };
 }
 
-function metadataTarget(placeUrl) {
+async function metadataTarget(placeUrl) {
+  const shareHint = await googleShareHint(placeUrl);
   return {
     url: placeUrl,
+    resolvedUrl: shareHint.resolvedUrl,
+    searchQuery: shareHint.searchQuery,
     source: sourceFromUrl(placeUrl)
   };
+}
+
+async function googleShareHint(placeUrl) {
+  const url = safeUrl(placeUrl);
+  if (!isGoogleShareUrl(url)) {
+    return {
+      resolvedUrl: "",
+      searchQuery: ""
+    };
+  }
+
+  try {
+    const response = await fetch(placeUrl, {
+      headers: {
+        "Accept": "text/html,application/xhtml+xml,text/plain;q=0.8,*/*;q=0.1",
+        "User-Agent": "LocusBot/0.1 (+https://github.com)"
+      }
+    });
+    const html = await response.text();
+
+    return {
+      resolvedUrl: response.url || "",
+      searchQuery: extractGoogleSearchQuery(html, safeUrl(response.url) || url)
+    };
+  } catch (error) {
+    console.warn(`Google share hint failed for ${placeUrl}: ${messageFromError(error)}`);
+    return {
+      resolvedUrl: "",
+      searchQuery: ""
+    };
+  }
+}
+
+function isGoogleShareUrl(url) {
+  return url?.hostname === "share.google" ||
+    (url?.hostname.endsWith("google.com") && url?.pathname === "/share.google");
+}
+
+function extractGoogleSearchQuery(html, baseUrl) {
+  const matches = String(html || "").matchAll(/href=["']([^"']*\/search\?[^"']*?q=[^"']+)["']/gi);
+
+  for (const match of matches) {
+    try {
+      const url = new URL(decodeEntities(match[1]), baseUrl);
+      const query = url.searchParams.get("q") || "";
+      if (query.trim()) return query.trim();
+    } catch {
+      // Keep looking for a usable search fallback.
+    }
+  }
+
+  return "";
 }
 
 function normalizeMetadata(metadata, target) {
@@ -258,6 +323,7 @@ function normalizeMetadata(metadata, target) {
   const name = stringOr(metadata.name, titleFromUrl(target.url));
   const address = stringOr(metadata.address, "");
   const city = stringOr(metadata.city, "");
+  const state = stringOr(metadata.state, "");
   const lat = stringOr(metadata.lat, "");
   const lng = stringOr(metadata.lng, "");
   const type = cleanType(metadata.type);
@@ -269,6 +335,7 @@ function normalizeMetadata(metadata, target) {
     name,
     address,
     city,
+    state,
     country: stringOr(metadata.country, ""),
     type,
     description: stringOr(metadata.description, ""),
@@ -288,6 +355,7 @@ function heuristicMetadata(target) {
     name,
     address: "",
     city: "",
+    state: "",
     country: "",
     type: "Other",
     description: "",
@@ -306,6 +374,7 @@ function fallbackMetadata(target, error) {
     name: titleFromUrl(target.url),
     address: "",
     city: "",
+    state: "",
     country: "",
     type: "Other",
     description: "",
@@ -328,6 +397,7 @@ async function getGeocode(metadata, env) {
       lat,
       lng,
       city: metadata.city || "",
+      state: metadata.state || "",
       country: metadata.country || ""
     };
   }
@@ -347,6 +417,7 @@ async function askGeocodeWorker(metadata, env) {
     name: metadata.name,
     address: metadata.address,
     city: metadata.city,
+    state: metadata.state,
     country: metadata.country,
     type: metadata.type
   };
@@ -402,6 +473,7 @@ function buildPlace(placeUrl, metadata, geocode) {
   const lng = geocodeLng ?? metadataLng;
   const address = metadata.address || geocode.displayAddress || "";
   const city = metadata.city || geocode.city || "";
+  const state = metadata.state || geocode.state || "";
   const country = countryName(metadata.country) || geocode.country || "";
   const name = displayName(metadata.name, geocode.name, titleFromUrl(placeUrl));
   const geocodeStatus = geocode.status === "ready"
@@ -420,6 +492,7 @@ function buildPlace(placeUrl, metadata, geocode) {
     name,
     address,
     city,
+    state,
     country,
     type: metadata.type || "Other",
     description: metadata.description || "",
@@ -461,6 +534,14 @@ function cleanType(type) {
   const text = String(type || "").trim().replace(/\s+/g, " ");
   if (!text) return "Other";
   return text.length > 80 ? text.slice(0, 80).trim() : text;
+}
+
+function safeUrl(input) {
+  try {
+    return new URL(input);
+  } catch {
+    return null;
+  }
 }
 
 function sourceFromUrl(input) {
@@ -515,6 +596,18 @@ function slugify(value) {
     .trim()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
+}
+
+function decodeEntities(value) {
+  return String(value)
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, "\"")
+    .replace(/&#39;/g, "'")
+    .replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCodePoint(parseInt(code, 16)));
 }
 
 function getOutputText(payload) {

@@ -16,7 +16,7 @@ export function loadAppState() {
           typeFilter = "All";
         }
 
-        if (cityFilter !== "All" && !places.some(place => cityLabel(place) === cityFilter)) {
+        if (cityFilter !== "All" && !places.some(place => cityLabel(place, places) === cityFilter)) {
           cityFilter = "All";
         }
 
@@ -78,6 +78,14 @@ function getConfiguredApiBaseUrl() {
   return value.trim().replace(/\/+$/, "");
 }
 
-function cityLabel(place) {
-  return place.city || "Unknown";
+function cityLabel(place, places) {
+  const city = place.city || "";
+  if (!city) return "Unknown";
+
+  const states = new Set(places
+    .filter(candidate => candidate.city === city)
+    .map(candidate => candidate.state || "")
+  );
+
+  return states.size > 1 && place.state ? `${city}, ${place.state}` : city;
 }
