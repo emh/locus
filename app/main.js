@@ -1,6 +1,24 @@
 import { geocodePlace, ingestPlace } from "./api.js";
+import {
+  applyMutation,
+  applyMutations,
+  collaboratorId,
+  createId,
+  createMutation,
+  getListItems,
+  listItemId,
+  normalizeCode,
+  normalizeCollaborator,
+  normalizeList,
+  normalizeListItem,
+  normalizePlaceRecord,
+  normalizeUserName,
+  visibleLists,
+  visiblePlaces
+} from "./model.js";
 import { normalizePlace, placeNeedsReview } from "./place.js";
-import { loadAppState, loadSettings, saveAppState } from "./storage.js";
+import { ensureSharedSyncState, loadAppState, loadSettings, migrateLegacyForUser, saveAppState } from "./storage.js";
+import { LocusSync, createRemoteList, createRemoteProfile, fetchRemoteList, fetchRemoteProfile, joinRemoteList } from "./sync.js";
 
 const SORTS = [
   { key: "newest", label: "newest first" },
@@ -24,6 +42,11 @@ const state = {
   isCreatingList: false,
   pickerSearch: "",
   listChooserPlaceId: null,
+  listContributorFilter: "",
+  setupScreen: null,
+  setupPayload: null,
+  syncStatus: "idle",
+  listSyncStatuses: {},
   settings: loadSettings()
 };
 
@@ -37,6 +60,10 @@ let markerLayer;
 let isProcessing = false;
 let toastTimer;
 let markerMap = new Map();
+let profileSync = null;
+let renderedSetupKey = "";
+let screenTransitionToken = 0;
+const listSyncs = new Map();
 
 const TILE_LAYER_URL = "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png";
 const TILE_LAYER_OPTIONS = {
@@ -53,6 +80,7 @@ const PLACE_MARKER_STYLE = {
   weight: 2,
   opacity: 1
 };
+const SCREEN_EXIT_MS = 180;
 
 function esc(value) {
   const div = document.createElement("div");
@@ -83,6 +111,14 @@ function isUrl(value) {
 
 function save() {
   saveAppState(state);
+}
+
+function hasUser() {
+  return Boolean(state.user?.id && state.user?.name);
+}
+
+function currentUserLabel() {
+  return state.user?.name || "";
 }
 
 function toast(message) {
@@ -126,7 +162,7 @@ function hasCoordinates(place) {
 }
 
 function getCurrentPlace() {
-  return state.places.find(place => place.id === state.currentPlaceId) || null;
+  return visiblePlaces(state.places).find(place => place.id === state.currentPlaceId) || null;
 }
 
 function getCurrentScreen() {
@@ -134,23 +170,56 @@ function getCurrentScreen() {
 }
 
 function getList(id) {
-  return state.lists.find(list => list.id === String(id)) || null;
+  return visibleLists(state.lists).find(list => list.id === String(id)) || null;
 }
 
 function getListsForPlace(placeId) {
   const id = String(placeId);
-  return state.lists.filter(list => list.placeIds.includes(id));
+  const listIds = new Set((state.listItems || [])
+    .filter(item => !item.deleted && item.placeId === id)
+    .map(item => item.listId));
+  return visibleLists(state.lists).filter(list => listIds.has(list.id));
 }
 
 function getListPlaces(list) {
   if (!list) return [];
-  const ids = new Set(list.placeIds);
-  return state.places.filter(place => ids.has(place.id));
+  const ids = new Set(getListItems(state, list.id).map(item => item.placeId));
+  return visiblePlaces(state.places).filter(place => ids.has(place.id));
+}
+
+function getListItem(listId, placeId, options = {}) {
+  return getListItems(state, listId, options).find(item => item.placeId === String(placeId)) || null;
+}
+
+function getListContributors(listId) {
+  const collaborators = (state.collaboratorsByList?.[listId] || []).filter(collaborator => !collaborator.deleted);
+  const byId = new Map(collaborators.map(collaborator => [collaborator.userId, collaborator]));
+
+  for (const item of getListItems(state, listId)) {
+    if (!item.addedByUserId || byId.has(item.addedByUserId)) continue;
+    byId.set(item.addedByUserId, normalizeCollaborator({
+      id: collaboratorId(listId, item.addedByUserId),
+      listId,
+      userId: item.addedByUserId,
+      name: item.addedByName || "Unknown",
+      joinedAt: item.addedAt
+    }));
+  }
+
+  return Array.from(byId.values()).sort((left, right) => left.name.localeCompare(right.name) || left.userId.localeCompare(right.userId));
+}
+
+function contributorLabel(listId, userId) {
+  const contributors = getListContributors(listId);
+  const contributor = contributors.find(candidate => candidate.userId === userId);
+  if (!contributor) return "Unknown";
+  const duplicate = contributors.filter(candidate => candidate.name.toLowerCase() === contributor.name.toLowerCase()).length > 1;
+  return duplicate ? `${contributor.name} ${contributor.userId.slice(0, 4)}` : contributor.name;
 }
 
 function getPlacePool(context = {}) {
   const list = context.listId ? getList(context.listId) : null;
-  return list ? getListPlaces(list) : [...state.places];
+  return list ? getListPlaces(list) : visiblePlaces(state.places);
 }
 
 function placeElement(id, scope = document) {
@@ -246,7 +315,8 @@ function getFilterState(context = {}) {
       search: state.listSearch,
       typeFilter: state.listTypeFilter,
       cityFilter: state.listCityFilter,
-      sortIndex: state.listSortIndex
+      sortIndex: state.listSortIndex,
+      contributorFilter: state.listContributorFilter
     };
   }
 
@@ -304,6 +374,10 @@ function ensureFilterState(context = {}) {
   if (filters.cityFilter !== "All" && !places.some(place => cityLabel(place) === filters.cityFilter)) {
     setCityFilter(context, "All");
   }
+
+  if (context.listId && filters.contributorFilter && !getListContributors(context.listId).some(contributor => contributor.userId === filters.contributorFilter)) {
+    state.listContributorFilter = "";
+  }
 }
 
 function renderStats(targetId = "stats", context = {}) {
@@ -312,7 +386,8 @@ function renderStats(targetId = "stats", context = {}) {
   const cities = new Set(places.filter(place => place.city).map(place => cityLabel(place))).size;
   const review = places.filter(placeNeedsReview).length;
   const suffix = review ? ` - ${review} need details` : "";
-  $(targetId).textContent = `${total} places - ${cities} cities${suffix}`;
+  const user = !context.listId && currentUserLabel() ? ` - ${currentUserLabel()}` : "";
+  $(targetId).textContent = `${total} places - ${cities} cities${suffix}${user}`;
 }
 
 function getTypes(context = {}) {
@@ -328,15 +403,39 @@ function getCities(context = {}) {
 function renderTypeFilters(targetId = "type-filters", context = {}) {
   const filters = getFilterState(context);
   $(targetId).innerHTML = getTypes(context).map(type =>
-    `<span class="cat-item${filters.typeFilter === type ? " active" : ""}" data-action="type-filter" data-type="${esc(type)}">${esc(type)}</span>`
+    `<span class="cat-item${filters.typeFilter === type ? " active" : ""}" data-action="type-filter" data-type="${esc(type)}">${esc(filterLabel(type))}</span>`
   ).join("");
 }
 
 function renderCityFilters(targetId = "city-filters", context = {}) {
   const filters = getFilterState(context);
   $(targetId).innerHTML = getCities(context).map(city =>
-    `<span class="cat-item${filters.cityFilter === city ? " active" : ""}" data-action="city-filter" data-city="${esc(city)}">${city === "All" ? "All Cities" : esc(city)}</span>`
+    `<span class="cat-item${filters.cityFilter === city ? " active" : ""}" data-action="city-filter" data-city="${esc(city)}">${city === "All" ? "all cities" : esc(city)}</span>`
   ).join("");
+}
+
+function filterLabel(value) {
+  return value === "All" ? "all" : String(value || "").toLowerCase();
+}
+
+function renderContributorFilters(targetId, listId) {
+  const target = $(targetId);
+  if (!target) return;
+
+  const contributors = getListContributors(listId);
+  if (contributors.length <= 1) {
+    state.listContributorFilter = "";
+    target.innerHTML = "";
+    return;
+  }
+
+  const all = `<span class="cat-item${state.listContributorFilter ? "" : " active"}" data-action="contributor-filter" data-user-id="">all contributors</span>`;
+  target.innerHTML = [
+    all,
+    ...contributors.map(contributor =>
+      `<span class="cat-item${state.listContributorFilter === contributor.userId ? " active" : ""}" data-action="contributor-filter" data-user-id="${esc(contributor.userId)}">${esc(contributorLabel(listId, contributor.userId))}</span>`
+    )
+  ].join("");
 }
 
 function renderSort(targetId = "sort-btn", context = {}) {
@@ -373,6 +472,13 @@ function getFiltered(context = {}) {
   if (filters.search) {
     const query = filters.search.toLowerCase();
     places = places.filter(place => placeMatchesSearch(place, query));
+  }
+
+  if (context.listId && filters.contributorFilter) {
+    const ids = new Set(getListItems(state, context.listId)
+      .filter(item => item.addedByUserId === filters.contributorFilter)
+      .map(item => item.placeId));
+    places = places.filter(place => ids.has(place.id));
   }
 
   const sort = SORTS[clampSortIndex(filters.sortIndex)].key;
@@ -412,9 +518,11 @@ function renderPlaces(targetId = "place-list", emptyId = "empty-state", context 
 function renderPlaceItem(place, context = {}) {
   const review = placeNeedsReview(place);
   const tagLabel = place.tags.length ? place.tags.map(tag => esc(tag)).join(" - ") : esc(place.source);
-  const meta = `${place.type || "Other"} - ${cityLabel(place)}${review ? " - needs details" : ""}`;
+  const item = context.listId ? getListItem(context.listId, place.id) : null;
+  const contributor = item?.addedByUserId ? ` - added by ${contributorLabel(context.listId, item.addedByUserId)}` : "";
+  const meta = `${place.type || "Other"} - ${cityLabel(place)}${review ? " - needs details" : ""}${contributor}`;
   const removeAction = context.listId ? `
-    <button class="row-action" data-action="remove-from-list" data-list-id="${esc(context.listId)}" data-place-id="${esc(place.id)}" type="button">Remove from list</button>
+    <button class="row-action" data-action="remove-from-list" data-list-id="${esc(context.listId)}" data-place-id="${esc(place.id)}" type="button">remove from list</button>
   ` : "";
 
   return `
@@ -442,7 +550,7 @@ function renderPlaceBrowser(ids, context = {}) {
 
 function getNearby(place) {
   if (!place.city) return [];
-  return state.places
+  return visiblePlaces(state.places)
     .filter(candidate => candidate.id !== place.id && candidate.city === place.city && candidate.state === place.state)
     .slice(0, 4);
 }
@@ -451,15 +559,22 @@ function renderScreen(options = {}) {
   const overlay = $("detail-overlay");
   const container = $("detail-content");
   const screen = getCurrentScreen();
-
-  destroyDetailMap();
+  const wasActive = overlay.classList.contains("active");
+  const hasContent = Boolean(container.innerHTML.trim());
+  const direction = options.direction === "back" ? "back" : "forward";
+  const shouldTransitionContent = Boolean(options.transition && wasActive && screen && hasContent);
+  const token = ++screenTransitionToken;
 
   if (!screen) {
     overlay.classList.remove("active");
     document.body.classList.remove("no-scroll");
-    container.className = "overlay-content";
-    container.innerHTML = "";
     state.currentPlaceId = null;
+    setTimeout(() => {
+      if (token !== screenTransitionToken) return;
+      destroyDetailMap();
+      container.className = "overlay-content";
+      container.innerHTML = "";
+    }, 350);
     return;
   }
 
@@ -468,9 +583,37 @@ function renderScreen(options = {}) {
   if (screen.type !== "place-detail") {
     state.currentPlaceId = null;
   }
-  if (options.resetScroll) {
+  if (options.resetScroll && !shouldTransitionContent) {
     overlay.scrollTop = 0;
   }
+
+  if (shouldTransitionContent) {
+    container.classList.remove("screen-enter", "screen-enter-forward", "screen-enter-back", "screen-exit-forward", "screen-exit-back");
+    container.classList.add(direction === "back" ? "screen-exit-back" : "screen-exit-forward");
+    setTimeout(() => {
+      if (token !== screenTransitionToken) return;
+      renderScreenBody(screen, options);
+      requestAnimationFrame(() => {
+        if (token !== screenTransitionToken) return;
+        container.classList.add(direction === "back" ? "screen-enter-back" : "screen-enter-forward");
+      });
+    }, SCREEN_EXIT_MS);
+    return;
+  }
+
+  renderScreenBody(screen, options);
+  if (options.resetScroll) {
+    container.classList.remove("screen-enter", "screen-enter-forward", "screen-enter-back");
+    requestAnimationFrame(() => container.classList.add(direction === "back" ? "screen-enter-back" : "screen-enter-forward"));
+  }
+}
+
+function renderScreenBody(screen, options = {}) {
+  const overlay = $("detail-overlay");
+  const container = $("detail-content");
+
+  destroyDetailMap();
+  container.classList.remove("screen-enter", "screen-enter-forward", "screen-enter-back", "screen-exit-forward", "screen-exit-back");
 
   if (screen.type === "lists") {
     renderListsIndex();
@@ -479,7 +622,7 @@ function renderScreen(options = {}) {
   } else if (screen.type === "place-picker") {
     renderPlacePicker(screen.listId);
   } else if (screen.type === "place-detail") {
-    const place = state.places.find(candidate => candidate.id === String(screen.placeId));
+    const place = visiblePlaces(state.places).find(candidate => candidate.id === String(screen.placeId));
     if (!place) {
       closeTopScreen();
       return;
@@ -489,8 +632,7 @@ function renderScreen(options = {}) {
   }
 
   if (options.resetScroll) {
-    container.classList.remove("screen-enter");
-    requestAnimationFrame(() => container.classList.add("screen-enter"));
+    overlay.scrollTop = 0;
   }
 }
 
@@ -502,7 +644,7 @@ function pushScreen(screen) {
   }
 
   state.screenStack.push(screen);
-  renderScreen({ resetScroll: true });
+  renderScreen({ resetScroll: true, transition: true, direction: "forward" });
 }
 
 function closeTopScreen() {
@@ -511,7 +653,7 @@ function closeTopScreen() {
   state.pendingDeleteId = null;
   state.listChooserPlaceId = null;
   state.pickerSearch = "";
-  renderScreen({ resetScroll: true });
+  renderScreen({ resetScroll: true, transition: true, direction: "back" });
   renderAll();
 }
 
@@ -528,6 +670,7 @@ function showListDetail(listId) {
   state.listTypeFilter = "All";
   state.listCityFilter = "All";
   state.listSortIndex = state.sortIndex;
+  state.listContributorFilter = "";
   pushScreen({ type: "list-detail", listId: list.id });
 }
 
@@ -541,21 +684,22 @@ function showPlacePicker(listId) {
 
 function renderListsIndex() {
   const container = $("detail-content");
+  const lists = visibleLists(state.lists);
   container.className = "overlay-content list-screen";
   container.innerHTML = `
-    <button class="back-btn" data-action="back" type="button">Back</button>
+    <button class="back-btn" data-action="back" type="button">back</button>
 
     <header class="screen-header">
       <h1 class="detail-name">lists</h1>
-      <p class="detail-meta">${state.lists.length} ${state.lists.length === 1 ? "list" : "lists"}</p>
+      <p class="detail-meta">${lists.length} ${lists.length === 1 ? "list" : "lists"}</p>
     </header>
 
     <div class="list-actions">
-      ${state.isCreatingList ? renderCreateListForm() : `<button class="action-link" data-action="show-create-list" type="button">New list</button>`}
+      ${state.isCreatingList ? renderCreateListForm() : `<button class="action-link" data-action="show-create-list" type="button">new list</button>`}
     </div>
 
     <div class="saved-lists">
-      ${state.lists.length ? state.lists.map(renderListItem).join("") : `<div class="empty-state inline-empty">No lists yet.</div>`}
+      ${lists.length ? lists.map(renderListItem).join("") : `<div class="empty-state inline-empty">No lists yet.</div>`}
     </div>
   `;
 
@@ -572,8 +716,8 @@ function renderCreateListForm() {
         <input id="new-list-name" name="name" autocomplete="off">
       </label>
       <div class="form-actions compact">
-        <button class="action-link" type="submit">Create</button>
-        <button class="action-link muted" data-action="cancel-create-list" type="button">Cancel</button>
+        <button class="action-link" type="submit">create</button>
+        <button class="action-link muted" data-action="cancel-create-list" type="button">cancel</button>
       </div>
     </form>
   `;
@@ -590,7 +734,6 @@ function renderListItem(list) {
         <h2 class="place-name">${esc(list.name)}</h2>
         <p class="place-address">${count} ${count === 1 ? "place" : "places"} - ${esc(city)}</p>
       </div>
-      <span class="list-arrow">View</span>
     </article>
   `;
 }
@@ -614,26 +757,32 @@ function renderListDetail(listId) {
   if (!list) {
     container.className = "overlay-content";
     container.innerHTML = `
-      <button class="back-btn" data-action="back" type="button">Back</button>
+      <button class="back-btn" data-action="back" type="button">back</button>
       <h1 class="detail-name">List not found</h1>
     `;
     return;
   }
 
   const context = { listId: list.id };
+  const contributors = getListContributors(list.id);
   container.className = "overlay-content detail-view";
   container.innerHTML = `
     <div class="detail-map-container"><div class="detail-map" id="detail-map"></div></div>
 
     <div class="detail-body">
-      <button class="back-btn" data-action="back" type="button">Back</button>
+      <button class="back-btn" data-action="back" type="button">back</button>
 
-      <header class="screen-header">
-        <h1 class="detail-name">${esc(list.name)}</h1>
-        <p class="detail-meta" id="list-stats"></p>
+      <header class="screen-header title-row list-title-row">
+        <div>
+          <h1 class="detail-name">${esc(list.name)}</h1>
+          <p class="detail-meta" id="list-stats"></p>
+        </div>
+        <button class="nav-link" data-action="share-list" data-list-id="${esc(list.id)}" type="button">share</button>
       </header>
 
-      <button class="action-link list-add-control" data-action="add-place-to-list" data-list-id="${esc(list.id)}" type="button">Add place</button>
+      <div class="list-actions">
+        <button class="action-link list-add-control" data-action="add-place-to-list" data-list-id="${esc(list.id)}" type="button">add place</button>
+      </div>
 
       <div class="input-wrap">
         <div class="input-field">
@@ -644,6 +793,7 @@ function renderListDetail(listId) {
 
       <nav class="filter-row" id="list-type-filters" aria-label="Place types"></nav>
       <nav class="filter-row" id="list-city-filters" aria-label="Cities"></nav>
+      ${contributors.length > 1 ? `<nav class="filter-row" id="list-contributor-filters" aria-label="Contributors"></nav>` : ""}
       <button class="sort-control" id="list-sort-btn" data-action="sort" type="button"></button>
       <div id="list-place-list"></div>
       <div class="empty-state" id="list-empty-state">No places found.</div>
@@ -658,7 +808,8 @@ function renderListDetail(listId) {
     placeList: "list-place-list",
     empty: "list-empty-state"
   }, context);
-  renderListDetailMap(getFiltered(context));
+  renderContributorFilters("list-contributor-filters", list.id);
+  scheduleListDetailMap(list.id, getFiltered(context));
 }
 
 function refreshListDetailResults(listId) {
@@ -671,6 +822,7 @@ function refreshListDetailResults(listId) {
     placeList: "list-place-list",
     empty: "list-empty-state"
   }, context);
+  renderContributorFilters("list-contributor-filters", listId);
   destroyDetailMap();
   renderListDetailMap(getFiltered(context));
 }
@@ -721,19 +873,19 @@ function renderPlacePicker(listId) {
     return;
   }
 
-  const selected = new Set(list.placeIds);
+  const selected = new Set(getListItems(state, list.id).map(item => item.placeId));
   const query = state.pickerSearch.toLowerCase();
-  const places = state.places
+  const places = visiblePlaces(state.places)
     .filter(place => !selected.has(place.id))
     .filter(place => !query || placeMatchesSearch(place, query))
     .sort((a, b) => a.name.localeCompare(b.name));
 
   container.className = "overlay-content list-screen";
   container.innerHTML = `
-    <button class="back-btn" data-action="back" type="button">Back</button>
+    <button class="back-btn" data-action="back" type="button">back</button>
 
     <header class="screen-header">
-      <h1 class="detail-name">Add place</h1>
+      <h1 class="detail-name">add place</h1>
       <p class="detail-meta">${esc(list.name)}</p>
     </header>
 
@@ -781,7 +933,7 @@ function renderDetail(place) {
     ${hasCoordinates(place) ? `<div class="detail-map-container"><div class="detail-map" id="detail-map"></div></div>` : ""}
 
     <div class="detail-body">
-      <button class="back-btn" data-action="back" type="button">Back</button>
+      <button class="back-btn" data-action="back" type="button">back</button>
 
       <h1 class="detail-name">${esc(place.name)}</h1>
       <p class="detail-address">${esc(locationLabel(place))}</p>
@@ -807,14 +959,36 @@ function renderDetail(place) {
 
       <hr class="detail-rule">
       <div class="detail-actions">
-        <button class="action-link" data-action="edit" type="button">Edit</button>
-        <a class="action-link muted" href="${esc(place.canonicalUrl || place.url)}" target="_blank" rel="noopener">Website</a>
+        <button class="action-link" data-action="edit" type="button">edit</button>
+        <a class="action-link muted" href="${esc(place.canonicalUrl || place.url)}" target="_blank" rel="noopener">website</a>
         ${renderDeleteAction(place)}
       </div>
     </div>
   `;
 
-  renderDetailMap(place);
+  schedulePlaceDetailMap(place.id, place);
+}
+
+function scheduleListDetailMap(listId, places) {
+  const token = screenTransitionToken;
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      const current = getCurrentScreen();
+      if (token !== screenTransitionToken || current?.type !== "list-detail" || current.listId !== listId) return;
+      renderListDetailMap(places);
+    });
+  });
+}
+
+function schedulePlaceDetailMap(placeId, place) {
+  const token = screenTransitionToken;
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      const current = getCurrentScreen();
+      if (token !== screenTransitionToken || current?.type !== "place-detail" || current.placeId !== placeId) return;
+      renderDetailMap(place);
+    });
+  });
 }
 
 function renderPlaceListsSection(place) {
@@ -827,20 +1001,21 @@ function renderPlaceListsSection(place) {
   return `
     <div class="section-label">Lists</div>
     <div class="list-chip-row">${chips}</div>
-    <button class="action-link" data-action="${state.lists.length ? "toggle-list-chooser" : "open-lists"}" data-place-id="${esc(place.id)}" type="button">Add to list</button>
+    <button class="action-link" data-action="${visibleLists(state.lists).length ? "toggle-list-chooser" : "open-lists"}" data-place-id="${esc(place.id)}" type="button">add to list</button>
     ${chooser}
   `;
 }
 
 function renderListChooser(place) {
-  if (!state.lists.length) {
+  const lists = visibleLists(state.lists);
+  if (!lists.length) {
     return `<div class="detail-empty">Create a list first.</div>`;
   }
 
   return `
     <div class="list-toggle-grid">
-      ${state.lists.map(list => {
-        const active = list.placeIds.includes(place.id);
+      ${lists.map(list => {
+        const active = Boolean(getListItem(list.id, place.id));
         return `
           <button class="list-toggle${active ? " active" : ""}" data-action="toggle-list-membership" data-list-id="${esc(list.id)}" data-place-id="${esc(place.id)}" type="button">
             ${esc(list.name)}
@@ -884,13 +1059,13 @@ function destroyDetailMap() {
 
 function renderDeleteAction(place) {
   if (state.pendingDeleteId !== place.id) {
-    return `<button class="action-link muted" data-action="request-delete" type="button">Remove</button>`;
+    return `<button class="action-link muted" data-action="request-delete" type="button">remove</button>`;
   }
 
   return `
-    <span class="delete-confirm-label">Remove?</span>
-    <button class="action-link" data-action="confirm-delete" type="button">Yes</button>
-    <button class="action-link muted" data-action="cancel-delete" type="button">Cancel</button>
+    <span class="delete-confirm-label">remove?</span>
+    <button class="action-link" data-action="confirm-delete" type="button">yes</button>
+    <button class="action-link muted" data-action="cancel-delete" type="button">cancel</button>
   `;
 }
 
@@ -899,7 +1074,7 @@ function renderEditForm(place) {
   const container = $("detail-content");
   container.className = "overlay-content";
   container.innerHTML = `
-    <button class="back-btn" data-action="cancel-edit" type="button">Back</button>
+    <button class="back-btn" data-action="cancel-edit" type="button">back</button>
 
     <h1 class="detail-name">Edit</h1>
     <p class="detail-meta">${esc(place.source)} - ${formatDate(place.dateAdded)}</p>
@@ -964,15 +1139,15 @@ function renderEditForm(place) {
       </label>
 
       <div class="form-actions">
-        <button class="action-link" type="submit">Save details</button>
-        <button class="action-link muted" data-action="cancel-edit" type="button">Cancel</button>
+        <button class="action-link" type="submit">save details</button>
+        <button class="action-link muted" data-action="cancel-edit" type="button">cancel</button>
       </div>
     </form>
   `;
 }
 
 function showDetail(id, options = {}) {
-  const place = state.places.find(candidate => candidate.id === String(id));
+  const place = visiblePlaces(state.places).find(candidate => candidate.id === String(id));
   if (!place) return;
 
   state.currentPlaceId = place.id;
@@ -1009,7 +1184,7 @@ async function saveEditForm(form) {
   if (!place) return;
 
   const data = new FormData(form);
-  let next = normalizePlace({
+  let next = normalizePlaceRecord({
     ...place,
     name: formString(data, "name") || place.name,
     type: formString(data, "type") || "Other",
@@ -1032,17 +1207,46 @@ async function saveEditForm(form) {
     next.geocodeStatus = "manual";
   }
 
-  const index = state.places.findIndex(candidate => candidate.id === place.id);
-  if (index >= 0) {
-    state.places[index] = next;
-  }
-
   state.currentPlaceId = next.id;
   state.isEditing = false;
-  save();
-  renderAll();
-  renderScreen();
-  toast(next.status === "ready" ? "Place updated" : "Place saved; details still needed");
+  const changes = placeFieldChanges(place, next).map(field => ({
+    entityType: "place",
+    entityId: place.id,
+    field,
+    value: next[field]
+  }));
+
+  if (changes.length) {
+    commitChanges(changes, next.status === "ready" ? "Place updated" : "Place saved; details still needed");
+  } else {
+    renderAll();
+    renderScreen();
+    toast("No changes");
+  }
+}
+
+function placeFieldChanges(previous, next) {
+  const fields = [
+    "name",
+    "type",
+    "address",
+    "city",
+    "state",
+    "country",
+    "tags",
+    "lat",
+    "lng",
+    "description",
+    "notes",
+    "dateUpdated",
+    "status",
+    "geocodeStatus",
+    "error",
+    "osmId",
+    "osmType"
+  ];
+
+  return fields.filter(field => JSON.stringify(previous[field] ?? null) !== JSON.stringify(next[field] ?? null));
 }
 
 async function geocodeIfNeeded(place) {
@@ -1103,6 +1307,112 @@ function messageFromError(error) {
   return error instanceof Error ? error.message : "Request failed";
 }
 
+function commitChanges(changes, message) {
+  if (!hasUser()) {
+    showNamePrompt();
+    return;
+  }
+
+  const mutations = changes.map(change => ({
+    change,
+    mutation: createMutation(state, change.entityType, change.entityId, change.field, change.value)
+  }));
+
+  for (const { change, mutation } of mutations) {
+    applyMutation(state, mutation);
+    queueMutation(mutation, change);
+  }
+
+  save();
+  flushSyncs();
+  renderAll();
+  renderScreen();
+  if (message) toast(message);
+  return mutations.map(item => item.mutation);
+}
+
+function queueMutation(mutation, change = {}) {
+  if (change.profile !== false) {
+    state.profileSync.mutationQueue.push(mutation);
+  }
+
+  const sharedCode = sharedCodeForChange(change);
+  if (sharedCode) {
+    ensureSharedSyncState(state, sharedCode, change.listId || mutation.value?.listId || mutation.entityId);
+    state.sharedListSync[sharedCode].mutationQueue.push(mutation);
+  }
+}
+
+function sharedCodeForChange(change = {}) {
+  if (change.sharedCode) return normalizeCode(change.sharedCode);
+  if (change.sharedListId) return getList(change.sharedListId)?.sharedCode || "";
+  if (change.listId) return getList(change.listId)?.sharedCode || "";
+  if (change.entityType === "list") return getList(change.entityId)?.sharedCode || "";
+  if (change.entityType === "list_item") return getList(change.value?.listId || change.entityId.split(":")[0])?.sharedCode || "";
+  return "";
+}
+
+function flushSyncs() {
+  profileSync?.flush();
+  for (const sync of listSyncs.values()) sync.flush();
+}
+
+function applyRemotePayload(payload) {
+  if (payload?.user) {
+    state.user = {
+      ...payload.user,
+      profileCode: payload.user.profileCode || payload.code || state.user?.profileCode || ""
+    };
+  }
+
+  if (Array.isArray(payload?.mutations)) {
+    applyMutations(state, payload.mutations);
+  } else {
+    mergeMaterializedPayload(payload);
+  }
+
+  if (payload?.highWatermark) {
+    if (payload.room?.type === "profile" || payload.user) {
+      state.profileSync.lastSyncTimestamp = payload.highWatermark;
+    } else if (payload.code) {
+      ensureSharedSyncState(state, payload.code, payload.room?.listId || payload.lists?.[0]?.id || "").lastSyncTimestamp = payload.highWatermark;
+    }
+  }
+}
+
+function mergeMaterializedPayload(payload = {}) {
+  const synthetic = [];
+  for (const place of payload.places || []) {
+    synthetic.push(createSyntheticMutation("place", place.id, "_create", place));
+  }
+  for (const list of payload.lists || []) {
+    synthetic.push(createSyntheticMutation("list", list.id, "_create", list));
+  }
+  for (const item of payload.listItems || []) {
+    synthetic.push(createSyntheticMutation("list_item", item.id, "_create", item));
+  }
+  for (const collaborators of Object.values(payload.collaboratorsByList || {})) {
+    for (const collaborator of collaborators) {
+      synthetic.push(createSyntheticMutation("collaborator", collaborator.id, "_create", collaborator));
+    }
+  }
+  applyMutations(state, synthetic);
+}
+
+function createSyntheticMutation(entityType, entityId, field, value) {
+  return {
+    id: createId(),
+    entityType,
+    entityId,
+    field,
+    value,
+    timestamp: `${String(Date.now()).padStart(13, "0")}:0000:import`,
+    authorId: value.addedByUserId || value.ownerUserId || value.userId || state.user?.id || "import",
+    authorName: value.addedByName || value.ownerName || value.name || state.user?.name || "Imported",
+    deviceId: "import"
+  };
+}
+
 function requestDeleteCurrentPlace() {
   const place = getCurrentPlace();
   if (!place) return;
@@ -1121,24 +1431,34 @@ function deleteCurrentPlace() {
   const place = getCurrentPlace();
   if (!place) return;
 
-  state.places = state.places.filter(candidate => candidate.id !== place.id);
-  state.lists = state.lists.map(list => ({
-    ...list,
-    placeIds: list.placeIds.filter(id => id !== place.id)
-  }));
+  const changes = [
+    { entityType: "place", entityId: place.id, field: "deleted", value: true }
+  ];
+
+  for (const item of (state.listItems || []).filter(candidate => candidate.placeId === place.id && !candidate.deleted)) {
+    changes.push({
+      entityType: "list_item",
+      entityId: item.id,
+      field: "deleted",
+      value: true,
+      listId: item.listId
+    });
+  }
+
   state.screenStack = state.screenStack.filter(screen => screen.type !== "place-detail" || screen.placeId !== place.id);
   state.currentPlaceId = null;
   state.pendingDeleteId = null;
   state.isEditing = false;
   state.listChooserPlaceId = null;
-  save();
-
-  renderScreen({ resetScroll: true });
-  renderAll();
-  toast("Place removed");
+  commitChanges(changes, "Place removed");
 }
 
 async function addPlace(url) {
+  if (!hasUser()) {
+    showNamePrompt();
+    return;
+  }
+
   if (isProcessing) return;
   isProcessing = true;
   let addedPlace = null;
@@ -1156,7 +1476,6 @@ async function addPlace(url) {
   try {
     const place = await ingestPlace(url, state.settings);
     addedPlace = upsertPlace(place);
-    save();
     renderAll();
 
     const newElement = placeElement(addedPlace.id, $("place-list"));
@@ -1186,6 +1505,11 @@ async function addPlace(url) {
 }
 
 function upsertPlace(place) {
+  if (!hasUser()) {
+    showNamePrompt();
+    return normalizePlaceRecord(place);
+  }
+
   const existingIndex = state.places.findIndex(candidate =>
     candidate.canonicalUrl === place.canonicalUrl ||
     candidate.url === place.url ||
@@ -1196,23 +1520,41 @@ function upsertPlace(place) {
 
   if (existingIndex >= 0) {
     const existing = state.places[existingIndex];
-    const next = normalizePlace({
+    const next = normalizePlaceRecord({
       ...existing,
       ...place,
       id: existing.id,
       dateAdded: existing.dateAdded,
       notes: existing.notes || place.notes,
-      isFavorite: existing.isFavorite
+      isFavorite: existing.isFavorite,
+      addedByUserId: existing.addedByUserId || state.user.id,
+      addedByName: existing.addedByName || state.user.name
     });
-    state.places[existingIndex] = next;
-    return next;
+    const changes = placeFieldChanges(existing, next).map(field => ({
+      entityType: "place",
+      entityId: existing.id,
+      field,
+      value: next[field]
+    }));
+    if (changes.length) commitChanges(changes);
+    return state.places.find(candidate => candidate.id === existing.id) || next;
   }
 
-  state.places.unshift(place);
-  return place;
+  const next = normalizePlaceRecord({
+    ...place,
+    addedByUserId: state.user.id,
+    addedByName: state.user.name
+  });
+  commitChanges([{ entityType: "place", entityId: next.id, field: "_create", value: next }]);
+  return state.places.find(candidate => candidate.id === next.id) || next;
 }
 
 function createList(form) {
+  if (!hasUser()) {
+    showNamePrompt();
+    return;
+  }
+
   const data = new FormData(form);
   const name = formString(data, "name");
 
@@ -1221,74 +1563,459 @@ function createList(form) {
     return;
   }
 
-  if (state.lists.some(list => list.name.toLowerCase() === name.toLowerCase())) {
+  if (visibleLists(state.lists).some(list => list.name.toLowerCase() === name.toLowerCase())) {
     toast("List already exists");
     return;
   }
 
-  state.lists.push({
-    id: crypto.randomUUID(),
+  const list = normalizeList({
+    id: createId(),
     name,
-    placeIds: [],
+    ownerUserId: state.user.id,
+    ownerName: state.user.name,
     dateCreated: new Date().toISOString()
   });
+  const collaborator = normalizeCollaborator({
+    id: collaboratorId(list.id, state.user.id),
+    listId: list.id,
+    userId: state.user.id,
+    name: state.user.name,
+    joinedAt: list.dateCreated
+  });
+
   state.isCreatingList = false;
-  save();
-  renderScreen();
-  renderAll();
-  toast("List created");
+  commitChanges([
+    { entityType: "list", entityId: list.id, field: "_create", value: list },
+    { entityType: "collaborator", entityId: collaborator.id, field: "_create", value: collaborator }
+  ], "List created");
 }
 
 function addPlaceToList(listId, placeId) {
   const list = getList(listId);
-  const place = state.places.find(candidate => candidate.id === String(placeId));
-  if (!list || !place || list.placeIds.includes(place.id)) return;
+  const place = visiblePlaces(state.places).find(candidate => candidate.id === String(placeId));
+  if (!list || !place || getListItem(list.id, place.id)) return;
 
-  list.placeIds.push(place.id);
-  save();
+  const item = normalizeListItem({
+    id: listItemId(list.id, place.id),
+    listId: list.id,
+    placeId: place.id,
+    addedByUserId: state.user.id,
+    addedByName: state.user.name,
+    addedAt: new Date().toISOString()
+  });
+  const changes = sharedSeedChangesForPlace(list, place);
+  changes.push({
+    entityType: "list_item",
+    entityId: item.id,
+    field: "_create",
+    value: item,
+    listId: list.id
+  });
+  commitChanges(changes, "Place added to list");
   closeTopScreen();
-  toast("Place added to list");
 }
 
 function removePlaceFromList(listId, placeId) {
   const list = getList(listId);
   if (!list) return;
 
-  const nextIds = list.placeIds.filter(id => id !== String(placeId));
-  if (nextIds.length === list.placeIds.length) return;
+  const item = getListItem(list.id, placeId);
+  if (!item) return;
 
-  list.placeIds = nextIds;
-  save();
-  renderScreen();
-  renderAll();
-  toast("Removed from list");
+  commitChanges([{
+    entityType: "list_item",
+    entityId: item.id,
+    field: "deleted",
+    value: true,
+    listId: list.id
+  }], "Removed from list");
 }
 
 function toggleListMembership(listId, placeId) {
   const list = getList(listId);
-  const place = state.places.find(candidate => candidate.id === String(placeId));
+  const place = visiblePlaces(state.places).find(candidate => candidate.id === String(placeId));
   if (!list || !place) return;
 
-  if (list.placeIds.includes(place.id)) {
-    list.placeIds = list.placeIds.filter(id => id !== place.id);
-    toast("Removed from list");
+  const item = getListItem(list.id, place.id, { includeDeleted: true });
+  if (item && !item.deleted) {
+    commitChanges([{
+      entityType: "list_item",
+      entityId: item.id,
+      field: "deleted",
+      value: true,
+      listId: list.id
+    }], "Removed from list");
   } else {
-    list.placeIds.push(place.id);
-    toast("Added to list");
+    const nextItem = normalizeListItem({
+      ...(item || {}),
+      id: item?.id || listItemId(list.id, place.id),
+      listId: list.id,
+      placeId: place.id,
+      addedByUserId: item?.addedByUserId || state.user.id,
+      addedByName: item?.addedByName || state.user.name,
+      addedAt: item?.addedAt || new Date().toISOString(),
+      deleted: false
+    });
+    const changes = sharedSeedChangesForPlace(list, place);
+    changes.push(item ? {
+      entityType: "list_item",
+      entityId: item.id,
+      field: "deleted",
+      value: false,
+      listId: list.id
+    } : {
+      entityType: "list_item",
+      entityId: nextItem.id,
+      field: "_create",
+      value: nextItem,
+      listId: list.id
+    });
+    commitChanges(changes, "Added to list");
+  }
+}
+
+function sharedSeedChangesForPlace(list, place) {
+  if (!list.sharedCode) return [];
+  return [{
+    entityType: "place",
+    entityId: place.id,
+    field: "_create",
+    value: normalizePlaceRecord(place),
+    sharedListId: list.id,
+    profile: false
+  }];
+}
+
+function renderSetupScreen() {
+  const screen = $("setup-screen");
+  const content = $("setup-content");
+  if (!screen || !content) return;
+
+  const active = !hasUser() || Boolean(state.setupScreen);
+  screen.classList.toggle("active", active);
+  document.body.classList.toggle("no-scroll", active || $("detail-overlay").classList.contains("active"));
+  if (!active) {
+    renderedSetupKey = "";
+    return;
   }
 
-  save();
+  if (!hasUser() && state.setupScreen !== "list-preview") {
+    setSetupContent(renderNamePrompt(), "name", () => $("setup-name")?.focus());
+    return;
+  }
+
+  if (state.setupScreen === "device-share") {
+    const code = state.setupPayload?.code || state.user.profileCode;
+    const url = deviceLink(code);
+    setSetupContent(`
+      <button class="back-btn" data-action="close-setup" type="button">back</button>
+      <h1>link device</h1>
+      <p class="setup-copy">Open this on another device.</p>
+      <input class="share-field" id="device-share-url" value="${esc(url)}" readonly>
+      <div class="setup-code" id="device-share-code">${esc(code)}</div>
+      <div class="detail-actions">
+        <button class="action-link" data-action="share-device-url" type="button">share url</button>
+        <button class="action-link" data-action="copy-device-url" type="button">copy url</button>
+        <button class="action-link muted" data-action="copy-device-code" type="button">copy code</button>
+      </div>
+    `, `device-share:${code}`);
+    return;
+  }
+
+  if (state.setupScreen === "list-share") {
+    const list = getList(state.setupPayload?.listId);
+    const code = list?.sharedCode || state.setupPayload?.code || "";
+    const url = listShareLink(code);
+    setSetupContent(`
+      <button class="back-btn" data-action="close-setup" type="button">back</button>
+      <h1>${esc(list?.name || "shared list")}</h1>
+      <p class="setup-copy">Share this list.</p>
+      <input class="share-field" id="list-share-url" value="${esc(url)}" readonly>
+      <div class="setup-code" id="list-share-code">${esc(code)}</div>
+      <div class="detail-actions">
+        <button class="action-link" data-action="share-list-url" type="button">share url</button>
+        <button class="action-link" data-action="copy-list-url" type="button">copy url</button>
+        <button class="action-link muted" data-action="copy-list-code" type="button">copy code</button>
+      </div>
+    `, `list-share:${list?.id || ""}:${code}`);
+    return;
+  }
+
+  if (state.setupScreen === "list-preview") {
+    const code = state.setupPayload?.code || state.setupPayload?.room?.code || "";
+    setSetupContent(renderListPreview(), `list-preview:${code}`, () => $("shared-list-name")?.focus());
+  }
+}
+
+function setSetupContent(html, key, afterRender) {
+  const content = $("setup-content");
+  if (!content) return;
+  const changed = renderedSetupKey !== key;
+  if (changed) {
+    content.innerHTML = html;
+    renderedSetupKey = key;
+    content.classList.remove("screen-enter");
+    requestAnimationFrame(() => content.classList.add("screen-enter"));
+  }
+  if (afterRender) requestAnimationFrame(afterRender);
+}
+
+function renderNamePrompt() {
+  return `
+    <h1>locus</h1>
+    <p class="setup-copy">Pick a name before saving places.</p>
+    <label class="field">
+      <span>Your name</span>
+      <input id="setup-name" autocomplete="name" spellcheck="false">
+    </label>
+    <div class="detail-actions">
+      <button class="action-link" data-action="save-name" type="button">continue</button>
+    </div>
+  `;
+}
+
+function renderListPreview() {
+  const payload = state.setupPayload || {};
+  const list = payload.lists?.[0] || {};
+  const places = payload.places || [];
+  const joinControl = hasUser()
+    ? `<button class="action-link" data-action="join-shared-list" type="button">add me as ${esc(state.user.name)}</button>`
+    : `
+      <label class="field">
+        <span>Your name</span>
+        <input id="shared-list-name" autocomplete="name" spellcheck="false">
+      </label>
+      <div class="detail-actions">
+        <button class="action-link" data-action="join-shared-list" type="button">add me</button>
+      </div>
+    `;
+
+  return `
+    ${hasUser() ? '<button class="back-btn" data-action="close-setup" type="button">back</button>' : ""}
+    <h1>${esc(list.name || "shared list")}</h1>
+    <p class="setup-copy">${places.length} ${places.length === 1 ? "place" : "places"}</p>
+    <div class="setup-preview-list">
+      ${places.length ? places.map(place => `
+        <article class="place-item">
+          <div class="place-meta">
+            <span>${esc(place.type || "Other")} - ${esc(place.city || "Unknown")}</span>
+          </div>
+          <h2 class="place-name">${esc(place.name)}</h2>
+          <p class="place-address">${esc(locationLabel(place))}</p>
+        </article>
+      `).join("") : `<div class="empty-state inline-empty">No places yet.</div>`}
+    </div>
+    ${joinControl}
+  `;
+}
+
+function showNamePrompt() {
+  state.setupScreen = "name";
+  state.setupPayload = null;
   renderAll();
-  renderScreen();
+}
+
+function completeNameSetup() {
+  const name = normalizeUserName($("setup-name")?.value);
+  if (!name) {
+    toast("Name required");
+    return;
+  }
+
+  migrateLegacyForUser(state, name);
+  state.setupScreen = null;
+  state.setupPayload = null;
+  save();
+  configureSync();
+  renderAll();
+}
+
+async function showDeviceLink() {
+  if (!hasUser()) return showNamePrompt();
+  const code = await ensureProfileCode();
+  state.setupScreen = "device-share";
+  state.setupPayload = { code };
+  renderAll();
+}
+
+async function ensureProfileCode() {
+  if (state.user?.profileCode) return state.user.profileCode;
+  const payload = await createRemoteProfile({
+    user: state.user,
+    mutations: state.profileSync.mutationQueue
+  }, state.settings);
+  applyRemotePayload(payload);
+  state.user.profileCode = payload.code;
+  if (Array.isArray(payload.confirmedIds)) {
+    const confirmed = new Set(payload.confirmedIds);
+    state.profileSync.mutationQueue = state.profileSync.mutationQueue.filter(mutation => !confirmed.has(mutation.id));
+  }
+  save();
+  configureSync();
+  return state.user.profileCode;
+}
+
+async function linkDevice(code) {
+  const payload = await fetchRemoteProfile(code, state.settings);
+  applyRemotePayload(payload);
+  state.user = {
+    ...payload.user,
+    profileCode: payload.code
+  };
+  state.profileSync.mutationQueue = [];
+  state.profileSync.lastSyncTimestamp = payload.highWatermark || "";
+  stripInviteQueries();
+  save();
+  configureSync();
+  state.setupScreen = null;
+  state.setupPayload = null;
+  renderAll();
+  toast("Device linked");
+}
+
+async function shareList(listId) {
+  if (!hasUser()) return showNamePrompt();
+  const list = getList(listId);
+  if (!list) return;
+  const code = await ensureListShared(list);
+  state.setupScreen = "list-share";
+  state.setupPayload = { listId: list.id, code };
+  renderAll();
+}
+
+async function ensureListShared(list) {
+  if (list.sharedCode) return list.sharedCode;
+  const payload = await createRemoteList({
+    list,
+    user: state.user,
+    places: getListPlaces(list),
+    listItems: getListItems(state, list.id)
+  }, state.settings);
+  applyRemotePayload(payload);
+  for (const mutation of payload.mutations || []) {
+    state.profileSync.mutationQueue.push(mutation);
+  }
+  ensureSharedSyncState(state, payload.code, list.id).lastSyncTimestamp = payload.highWatermark || "";
+  save();
+  configureSync();
+  return payload.code;
+}
+
+async function showSharedListPreview(code) {
+  const payload = await fetchRemoteList(code, state.settings);
+  state.setupScreen = "list-preview";
+  state.setupPayload = payload;
+  renderAll();
+}
+
+async function joinSharedList() {
+  const code = state.setupPayload?.code || state.setupPayload?.room?.code;
+  if (!code) return;
+
+  if (!hasUser()) {
+    const name = normalizeUserName($("shared-list-name")?.value);
+    if (!name) {
+      toast("Name required");
+      return;
+    }
+    migrateLegacyForUser(state, name);
+  }
+
+  const payload = await joinRemoteList(code, state.user, state.settings);
+  applyRemotePayload(payload);
+  for (const mutation of payload.mutations || []) {
+    state.profileSync.mutationQueue.push(mutation);
+  }
+  const listId = payload.room?.listId || payload.lists?.[0]?.id || "";
+  ensureSharedSyncState(state, payload.code, listId).lastSyncTimestamp = payload.highWatermark || "";
+  stripInviteQueries();
+  save();
+  configureSync();
+  state.setupScreen = null;
+  state.setupPayload = null;
+  renderAll();
+  if (listId && getList(listId)) {
+    state.screenStack = [{ type: "list-detail", listId }];
+    state.listSearch = "";
+    state.listTypeFilter = "All";
+    state.listCityFilter = "All";
+    state.listSortIndex = state.sortIndex;
+    state.listContributorFilter = "";
+    renderScreen({ resetScroll: true });
+  }
+  toast("list added");
+}
+
+function closeSetup() {
+  state.setupScreen = null;
+  state.setupPayload = null;
+  stripInviteQueries();
+  renderAll();
+}
+
+function deviceLink(code) {
+  const url = new URL(globalThis.location.href);
+  url.search = "";
+  url.hash = "";
+  url.searchParams.set("device", code);
+  return url.toString();
+}
+
+function listShareLink(code) {
+  const url = new URL(globalThis.location.href);
+  url.search = "";
+  url.hash = "";
+  url.searchParams.set("list", code);
+  return url.toString();
+}
+
+function stripInviteQueries() {
+  const url = new URL(globalThis.location.href);
+  if (!url.searchParams.has("device") && !url.searchParams.has("list")) return;
+  url.searchParams.delete("device");
+  url.searchParams.delete("list");
+  history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+}
+
+async function copyText(value, message) {
+  await navigator.clipboard?.writeText(value);
+  toast(message);
+}
+
+async function shareText(title, url, fallbackMessage) {
+  if (navigator.share) {
+    await navigator.share({ title, url });
+  } else {
+    await copyText(url, fallbackMessage);
+  }
 }
 
 function renderAll() {
+  renderSetupScreen();
+  if (!hasUser()) {
+    updateMarkers();
+    return;
+  }
+
+  renderSyncIndicator();
   renderStats();
   renderTypeFilters();
   renderCityFilters();
   renderSort();
   renderPlaces();
   updateMarkers();
+}
+
+function renderSyncIndicator() {
+  const dot = $("sync-dot");
+  if (!dot) return;
+  const profilePending = state.profileSync?.mutationQueue?.length > 0;
+  const listPending = Object.values(state.sharedListSync || {}).some(syncState => syncState.mutationQueue?.length > 0);
+  const synced = Boolean(state.user?.profileCode && !profilePending && !listPending && state.syncStatus !== "syncing");
+  dot.classList.toggle("synced", synced);
+  dot.classList.toggle("unsynced", !synced);
+  dot.setAttribute("aria-label", synced ? "synced" : "not synced");
+  dot.title = synced ? "synced" : "not synced";
 }
 
 function getContextFromElement(element) {
@@ -1302,11 +2029,41 @@ function bindEvents() {
   const status = $("input-status");
 
   $("lists-btn").addEventListener("click", showLists);
+  $("link-device-btn").addEventListener("click", () => runAction(showDeviceLink));
+
+  $("setup-content").addEventListener("click", event => {
+    const action = event.target.closest("[data-action]");
+    if (!action) return;
+
+    runAction(async () => {
+      if (action.dataset.action === "save-name") return completeNameSetup();
+      if (action.dataset.action === "close-setup") return closeSetup();
+      if (action.dataset.action === "copy-device-url") return copyText($("device-share-url")?.value || "", "url copied");
+      if (action.dataset.action === "copy-device-code") return copyText($("device-share-code")?.textContent || "", "code copied");
+      if (action.dataset.action === "share-device-url") return shareText("link locus device", $("device-share-url")?.value || "", "url copied");
+      if (action.dataset.action === "copy-list-url") return copyText($("list-share-url")?.value || "", "url copied");
+      if (action.dataset.action === "copy-list-code") return copyText($("list-share-code")?.textContent || "", "code copied");
+      if (action.dataset.action === "share-list-url") return shareText("share locus list", $("list-share-url")?.value || "", "url copied");
+      if (action.dataset.action === "join-shared-list") return joinSharedList();
+    });
+  });
+
+  $("setup-content").addEventListener("keydown", event => {
+    if (event.key !== "Enter") return;
+    if (event.target?.id === "setup-name") {
+      event.preventDefault();
+      completeNameSetup();
+    }
+    if (event.target?.id === "shared-list-name") {
+      event.preventDefault();
+      runAction(joinSharedList);
+    }
+  });
 
   input.addEventListener("input", () => {
     const value = input.value.trim();
     if (isUrl(value)) {
-      status.textContent = "Enter to add place";
+      status.textContent = "enter to add place";
       status.classList.remove("is-error");
       state.search = "";
     } else {
@@ -1426,6 +2183,7 @@ function bindEvents() {
         return renderScreen();
       }
       if (action.dataset.action === "add-place-to-list") return showPlacePicker(action.dataset.listId);
+      if (action.dataset.action === "share-list") return runAction(() => shareList(action.dataset.listId));
       if (action.dataset.action === "choose-place-for-list") return addPlaceToList(action.dataset.listId, action.dataset.placeId);
       if (action.dataset.action === "remove-from-list") return removePlaceFromList(action.dataset.listId, action.dataset.placeId);
       if (action.dataset.action === "toggle-list-chooser") {
@@ -1442,6 +2200,10 @@ function bindEvents() {
         const context = getContextFromElement(action);
         setCityFilter(context, action.dataset.city);
         return context.listId ? renderScreen() : renderAll();
+      }
+      if (action.dataset.action === "contributor-filter") {
+        state.listContributorFilter = action.dataset.userId || "";
+        return renderScreen();
       }
       if (action.dataset.action === "sort") {
         const context = current?.type === "list-detail" ? { listId: current.listId } : {};
@@ -1470,10 +2232,117 @@ function bindEvents() {
   });
 }
 
+function runAction(fn) {
+  Promise.resolve(fn()).catch(error => {
+    toast(error instanceof Error ? error.message : String(error));
+  });
+}
+
+function configureSync() {
+  if (!hasUser()) {
+    profileSync?.stop();
+    profileSync = null;
+    for (const sync of listSyncs.values()) sync.stop();
+    listSyncs.clear();
+    state.syncStatus = "idle";
+    return;
+  }
+
+  if (state.user.profileCode) {
+    if (!profileSync || profileSync.code !== state.user.profileCode) {
+      profileSync?.stop();
+      profileSync = new LocusSync({
+        kind: "profiles",
+        code: state.user.profileCode,
+        state,
+        save,
+        onStatus(status) {
+          state.syncStatus = status;
+          renderSyncIndicator();
+        },
+        onChange() {
+          save();
+          configureSync();
+          renderAll();
+          renderScreen();
+        },
+        onRoom(room) {
+          if (room?.code && state.user) {
+            state.user.profileCode = room.code;
+            save();
+          }
+        }
+      });
+      profileSync.start();
+    }
+  } else {
+    profileSync?.stop();
+    profileSync = null;
+  }
+
+  const desired = new Map();
+  for (const list of visibleLists(state.lists)) {
+    if (!list.sharedCode) continue;
+    desired.set(list.sharedCode, list.id);
+    ensureSharedSyncState(state, list.sharedCode, list.id);
+  }
+
+  for (const [code, sync] of listSyncs.entries()) {
+    if (!desired.has(code)) {
+      sync.stop();
+      listSyncs.delete(code);
+    }
+  }
+
+  for (const [code, listId] of desired.entries()) {
+    if (listSyncs.has(code)) continue;
+    const sync = new LocusSync({
+      kind: "lists",
+      code,
+      state,
+      save,
+      onStatus(status) {
+        state.listSyncStatuses[code] = status;
+        renderSyncIndicator();
+      },
+      onChange() {
+        save();
+        renderAll();
+        renderScreen();
+      },
+      onRoom(room) {
+        if (room?.code) ensureSharedSyncState(state, room.code, room.listId || listId);
+      }
+    });
+    listSyncs.set(code, sync);
+    sync.start();
+  }
+}
+
+function handleInviteQueries() {
+  const params = new URLSearchParams(globalThis.location.search);
+  const deviceCode = normalizeCode(params.get("device"));
+  const listCode = normalizeCode(params.get("list"));
+
+  if (deviceCode) {
+    runAction(() => linkDevice(deviceCode));
+    return;
+  }
+
+  if (listCode) {
+    runAction(() => showSharedListPreview(listCode));
+    return;
+  }
+
+  if (!hasUser()) showNamePrompt();
+}
+
 function init() {
   initMap();
-  renderAll();
   bindEvents();
+  handleInviteQueries();
+  configureSync();
+  renderAll();
   registerServiceWorker();
   watchForAppUpdates();
 }

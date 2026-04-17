@@ -32,7 +32,11 @@
       <header>
         <div class="title-row">
           <h1>places</h1>
-          <button class="nav-link" id="lists-btn" type="button">Lists</button>
+          <div class="title-actions">
+            <span class="sync-dot" id="sync-dot" aria-label="not synced" title="not synced"></span>
+            <button class="nav-link" id="link-device-btn" type="button">link</button>
+            <button class="nav-link" id="lists-btn" type="button">lists</button>
+          </div>
         </div>
         <p id="stats"></p>
       </header>
@@ -55,6 +59,10 @@
 
   <div class="overlay" id="detail-overlay">
     <div class="overlay-content" id="detail-content"></div>
+  </div>
+
+  <div class="setup-screen" id="setup-screen">
+    <div class="setup-content" id="setup-content"></div>
   </div>
 
   <div class="toast" id="toast"></div>

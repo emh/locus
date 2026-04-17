@@ -1,6 +1,6 @@
 # Locus
 
-A small personal app for saving places from URLs, extracting place metadata, geocoding addresses, and browsing the saved places in list and map views.
+A small personal app for saving places from URLs, extracting place metadata, geocoding addresses, and browsing the saved places in list and map views. Locus is local-first: it stores data in the browser, then syncs linked devices and shared lists through a Cloudflare Durable Object worker.
 
 ## Local Development
 
@@ -20,13 +20,15 @@ The default local URLs are:
 
 - Web app: `http://localhost:8020`
 - Place Worker: `http://localhost:8797`
+- Sync Worker: `http://localhost:8796`
 - Geocode Worker: `http://localhost:8799`
 
-The frontend stores saved places in `localStorage` under `locus_v1`.
+The frontend stores current data in `localStorage` under `locus_v2`. Existing `locus_v1` data is migrated after the user picks a name.
 
 ## Workers
 
 - `workers/place/` is the public API Worker. It sends the submitted URL to an OpenAI model with structured output and the `web_search` tool, extracts `name`, `address`, `city`, `state`, `country`, a model-chosen `type`, `description`, `tags`, canonical URL, optional coordinates, and relevance status, then asks the geocode Worker for coordinates only when the model did not return usable lat/lng values. It also exposes `/api/geocode` so manual address edits can be geocoded without making the geocode Worker public.
+- `workers/sync/` is the public sync Worker. It stores one Durable Object room per profile invite code and per shared-list invite code. Clients exchange HLC-stamped mutations over WebSocket with HTTP fallback.
 - `workers/geocode/` is the Nominatim Worker. It geocodes a normalized place query and caches results at the Worker boundary.
 
 Test the ingest path locally with:
@@ -58,11 +60,12 @@ npx wrangler secret put OPENAI_API_KEY --config workers/place/wrangler.toml
 
 ## Production
 
-The frontend is static and can publish to GitHub Pages. Set the public place Worker URL in `app/config.js`:
+The frontend is static and can publish to GitHub Pages. Set the public Worker URLs in `app/config.js`:
 
 ```js
 globalThis.LOCUS_CONFIG = {
-  apiBaseUrl: "https://locus-place.YOUR_WORKERS_SUBDOMAIN.workers.dev"
+  apiBaseUrl: "https://locus-place.YOUR_WORKERS_SUBDOMAIN.workers.dev",
+  syncBaseUrl: "https://locus-sync.YOUR_WORKERS_SUBDOMAIN.workers.dev"
 };
 ```
 
@@ -71,7 +74,7 @@ The Worker deploy workflow lives at `.github/workflows/deploy-workers.yml`. Add 
 - `CLOUDFLARE_API_TOKEN`
 - `CLOUDFLARE_ACCOUNT_ID`
 
-The workflow deploys `locus-geocode`, then `locus-place`, because the place Worker has a service binding to the geocode Worker.
+The workflow deploys `locus-geocode`, then `locus-place`, then `locus-sync`. The place Worker has a service binding to the geocode Worker; the sync Worker is independent.
 
 You can also deploy manually:
 

@@ -16,7 +16,9 @@ const APP_SHELL = [
   "./main.js",
   "./api.js",
   "./place.js",
+  "./model.js",
   "./storage.js",
+  "./sync.js",
   "./manifest.webmanifest",
   "./icon.png"
 ];
