@@ -9,6 +9,8 @@ export function loadAppState() {
       const data = JSON.parse(raw);
       if (Array.isArray(data.places)) {
         const places = data.places.map(normalizePlace);
+        const placeIds = new Set(places.map(place => place.id));
+        const lists = normalizeLists(data.lists, placeIds);
         let typeFilter = data.typeFilter || "All";
         let cityFilter = data.cityFilter || "All";
 
@@ -22,6 +24,7 @@ export function loadAppState() {
 
         return {
           places,
+          lists,
           typeFilter,
           cityFilter,
           sortIndex: Number.isInteger(data.sortIndex) ? data.sortIndex : 0
@@ -34,6 +37,7 @@ export function loadAppState() {
 
   return {
     places: [],
+    lists: [],
     typeFilter: "All",
     cityFilter: "All",
     sortIndex: 0
@@ -44,6 +48,7 @@ export function saveAppState(state) {
   try {
     localStorage.setItem(STATE_STORAGE_KEY, JSON.stringify({
       places: state.places,
+      lists: normalizeLists(state.lists, new Set(state.places.map(place => place.id))),
       typeFilter: state.typeFilter,
       cityFilter: state.cityFilter,
       sortIndex: state.sortIndex
@@ -51,6 +56,29 @@ export function saveAppState(state) {
   } catch {
     // Local storage can fail in private windows or quota pressure.
   }
+}
+
+function normalizeLists(lists, validPlaceIds) {
+  if (!Array.isArray(lists)) return [];
+
+  return lists
+    .map(list => normalizeList(list, validPlaceIds))
+    .filter(Boolean);
+}
+
+function normalizeList(list, validPlaceIds) {
+  if (!list || typeof list !== "object") return null;
+
+  const name = typeof list.name === "string" ? list.name.trim() : "";
+  if (!name) return null;
+
+  const placeIds = Array.isArray(list.placeIds) ? list.placeIds : [];
+  return {
+    id: String(list.id || crypto.randomUUID()),
+    name,
+    placeIds: Array.from(new Set(placeIds.map(id => String(id)))).filter(id => validPlaceIds.has(id)),
+    dateCreated: list.dateCreated || new Date().toISOString()
+  };
 }
 
 export function loadSettings() {

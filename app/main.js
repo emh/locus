@@ -9,14 +9,25 @@ const SORTS = [
   { key: "city", label: "city" }
 ];
 
+const loadedState = loadAppState();
 const state = {
-  ...loadAppState(),
+  ...loadedState,
   search: "",
+  listSearch: "",
+  listTypeFilter: "All",
+  listCityFilter: "All",
+  listSortIndex: clampSortIndex(loadedState.sortIndex),
   currentPlaceId: null,
   isEditing: false,
   pendingDeleteId: null,
+  screenStack: [],
+  isCreatingList: false,
+  pickerSearch: "",
+  listChooserPlaceId: null,
   settings: loadSettings()
 };
+
+state.sortIndex = clampSortIndex(state.sortIndex);
 
 const $ = id => document.getElementById(id);
 
@@ -58,6 +69,10 @@ function formatDate(iso) {
   const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   const label = `${months[date.getMonth()]} ${date.getDate()}`;
   return date.getFullYear() === now.getFullYear() ? label : `${label}, ${date.getFullYear()}`;
+}
+
+function clampSortIndex(value) {
+  return Number.isInteger(value) && value >= 0 && value < SORTS.length ? value : 0;
 }
 
 function isUrl(value) {
@@ -114,8 +129,32 @@ function getCurrentPlace() {
   return state.places.find(place => place.id === state.currentPlaceId) || null;
 }
 
-function placeElement(id) {
-  return Array.from(document.querySelectorAll(".place-item")).find(element => element.dataset.id === String(id));
+function getCurrentScreen() {
+  return state.screenStack[state.screenStack.length - 1] || null;
+}
+
+function getList(id) {
+  return state.lists.find(list => list.id === String(id)) || null;
+}
+
+function getListsForPlace(placeId) {
+  const id = String(placeId);
+  return state.lists.filter(list => list.placeIds.includes(id));
+}
+
+function getListPlaces(list) {
+  if (!list) return [];
+  const ids = new Set(list.placeIds);
+  return state.places.filter(place => ids.has(place.id));
+}
+
+function getPlacePool(context = {}) {
+  const list = context.listId ? getList(context.listId) : null;
+  return list ? getListPlaces(list) : [...state.places];
+}
+
+function placeElement(id, scope = document) {
+  return Array.from(scope.querySelectorAll(".place-item")).find(element => element.dataset.id === String(id));
 }
 
 function initMap() {
@@ -160,11 +199,11 @@ function updateMarkers() {
     marker.on("click", () => showDetail(place.id));
     marker.on("mouseover", () => {
       marker.setRadius(9);
-      placeElement(place.id)?.classList.add("highlight");
+      placeElement(place.id, $("place-list"))?.classList.add("highlight");
     });
     marker.on("mouseout", () => {
       marker.setRadius(6);
-      placeElement(place.id)?.classList.remove("highlight");
+      placeElement(place.id, $("place-list"))?.classList.remove("highlight");
     });
 
     marker.addTo(markerLayer);
@@ -172,12 +211,18 @@ function updateMarkers() {
     bounds.push([place.lat, place.lng]);
   }
 
+  fitMapToBounds(map, bounds);
+}
+
+function fitMapToBounds(targetMap, bounds) {
+  if (!targetMap) return;
+
   if (!bounds.length) {
-    map.setView([20, 0], 2);
+    targetMap.setView([20, 0], 2);
   } else if (bounds.length === 1) {
-    map.flyTo(bounds[0], 14, { duration: 0.8 });
+    targetMap.flyTo(bounds[0], 14, { duration: 0.8 });
   } else {
-    map.flyToBounds(bounds, { padding: [40, 40], maxZoom: 14, duration: 0.8 });
+    targetMap.flyToBounds(bounds, { padding: [40, 40], maxZoom: 14, duration: 0.8 });
   }
 }
 
@@ -195,69 +240,142 @@ function unhighlightMarker(id) {
   marker.setStyle({ fillColor: "#8b0000" });
 }
 
-function renderStats() {
-  const total = state.places.length;
-  const cities = new Set(state.places.filter(place => place.city).map(place => cityLabel(place))).size;
-  const review = state.places.filter(placeNeedsReview).length;
-  const suffix = review ? ` - ${review} need details` : "";
-  $("stats").textContent = `${total} places - ${cities} cities${suffix}`;
+function getFilterState(context = {}) {
+  if (context.listId) {
+    return {
+      search: state.listSearch,
+      typeFilter: state.listTypeFilter,
+      cityFilter: state.listCityFilter,
+      sortIndex: state.listSortIndex
+    };
+  }
+
+  return {
+    search: state.search,
+    typeFilter: state.typeFilter,
+    cityFilter: state.cityFilter,
+    sortIndex: state.sortIndex
+  };
 }
 
-function getTypes() {
-  const types = new Set(state.places.map(place => place.type || "Other"));
+function setSearch(context, value) {
+  if (context.listId) {
+    state.listSearch = value;
+  } else {
+    state.search = value;
+  }
+}
+
+function setTypeFilter(context, value) {
+  if (context.listId) {
+    state.listTypeFilter = value;
+  } else {
+    state.typeFilter = value;
+    save();
+  }
+}
+
+function setCityFilter(context, value) {
+  if (context.listId) {
+    state.listCityFilter = value;
+  } else {
+    state.cityFilter = value;
+    save();
+  }
+}
+
+function advanceSort(context) {
+  if (context.listId) {
+    state.listSortIndex = (state.listSortIndex + 1) % SORTS.length;
+  } else {
+    state.sortIndex = (state.sortIndex + 1) % SORTS.length;
+    save();
+  }
+}
+
+function ensureFilterState(context = {}) {
+  const places = getPlacePool(context);
+  const filters = getFilterState(context);
+
+  if (filters.typeFilter !== "All" && !places.some(place => (place.type || "Other") === filters.typeFilter)) {
+    setTypeFilter(context, "All");
+  }
+
+  if (filters.cityFilter !== "All" && !places.some(place => cityLabel(place) === filters.cityFilter)) {
+    setCityFilter(context, "All");
+  }
+}
+
+function renderStats(targetId = "stats", context = {}) {
+  const places = getPlacePool(context);
+  const total = places.length;
+  const cities = new Set(places.filter(place => place.city).map(place => cityLabel(place))).size;
+  const review = places.filter(placeNeedsReview).length;
+  const suffix = review ? ` - ${review} need details` : "";
+  $(targetId).textContent = `${total} places - ${cities} cities${suffix}`;
+}
+
+function getTypes(context = {}) {
+  const types = new Set(getPlacePool(context).map(place => place.type || "Other"));
   return ["All", ...Array.from(types).sort((a, b) => a.localeCompare(b))];
 }
 
-function getCities() {
-  const cities = new Set(state.places.map(place => cityLabel(place)));
+function getCities(context = {}) {
+  const cities = new Set(getPlacePool(context).map(place => cityLabel(place)));
   return ["All", ...Array.from(cities).sort((a, b) => a.localeCompare(b))];
 }
 
-function renderTypeFilters() {
-  $("type-filters").innerHTML = getTypes().map(type =>
-    `<span class="cat-item${state.typeFilter === type ? " active" : ""}" data-type="${esc(type)}">${esc(type)}</span>`
+function renderTypeFilters(targetId = "type-filters", context = {}) {
+  const filters = getFilterState(context);
+  $(targetId).innerHTML = getTypes(context).map(type =>
+    `<span class="cat-item${filters.typeFilter === type ? " active" : ""}" data-action="type-filter" data-type="${esc(type)}">${esc(type)}</span>`
   ).join("");
 }
 
-function renderCityFilters() {
-  $("city-filters").innerHTML = getCities().map(city =>
-    `<span class="cat-item${state.cityFilter === city ? " active" : ""}" data-city="${esc(city)}">${city === "All" ? "All Cities" : esc(city)}</span>`
+function renderCityFilters(targetId = "city-filters", context = {}) {
+  const filters = getFilterState(context);
+  $(targetId).innerHTML = getCities(context).map(city =>
+    `<span class="cat-item${filters.cityFilter === city ? " active" : ""}" data-action="city-filter" data-city="${esc(city)}">${city === "All" ? "All Cities" : esc(city)}</span>`
   ).join("");
 }
 
-function renderSort() {
-  $("sort-btn").textContent = SORTS[state.sortIndex].label;
+function renderSort(targetId = "sort-btn", context = {}) {
+  const filters = getFilterState(context);
+  $(targetId).textContent = SORTS[clampSortIndex(filters.sortIndex)].label;
 }
 
-function getFiltered() {
-  let places = [...state.places];
+function placeMatchesSearch(place, query) {
+  return place.name.toLowerCase().includes(query) ||
+    place.url.toLowerCase().includes(query) ||
+    place.source.toLowerCase().includes(query) ||
+    place.address.toLowerCase().includes(query) ||
+    place.city.toLowerCase().includes(query) ||
+    place.state.toLowerCase().includes(query) ||
+    place.country.toLowerCase().includes(query) ||
+    place.type.toLowerCase().includes(query) ||
+    place.description.toLowerCase().includes(query) ||
+    place.notes.toLowerCase().includes(query) ||
+    place.tags.some(tag => tag.toLowerCase().includes(query));
+}
 
-  if (state.typeFilter !== "All") {
-    places = places.filter(place => (place.type || "Other") === state.typeFilter);
+function getFiltered(context = {}) {
+  let places = [...getPlacePool(context)];
+  const filters = getFilterState(context);
+
+  if (filters.typeFilter !== "All") {
+    places = places.filter(place => (place.type || "Other") === filters.typeFilter);
   }
 
-  if (state.cityFilter !== "All") {
-    places = places.filter(place => cityLabel(place) === state.cityFilter);
+  if (filters.cityFilter !== "All") {
+    places = places.filter(place => cityLabel(place) === filters.cityFilter);
   }
 
-  if (state.search) {
-    const query = state.search.toLowerCase();
-    places = places.filter(place =>
-      place.name.toLowerCase().includes(query) ||
-      place.url.toLowerCase().includes(query) ||
-      place.source.toLowerCase().includes(query) ||
-      place.address.toLowerCase().includes(query) ||
-      place.city.toLowerCase().includes(query) ||
-      place.state.toLowerCase().includes(query) ||
-      place.country.toLowerCase().includes(query) ||
-      place.type.toLowerCase().includes(query) ||
-      place.description.toLowerCase().includes(query) ||
-      place.notes.toLowerCase().includes(query) ||
-      place.tags.some(tag => tag.toLowerCase().includes(query))
-    );
+  if (filters.search) {
+    const query = filters.search.toLowerCase();
+    places = places.filter(place => placeMatchesSearch(place, query));
   }
 
-  const sort = SORTS[state.sortIndex].key;
+  const sort = SORTS[clampSortIndex(filters.sortIndex)].key;
   switch (sort) {
     case "newest":
       places.sort((a, b) => new Date(b.dateAdded) - new Date(a.dateAdded));
@@ -276,10 +394,10 @@ function getFiltered() {
   return places;
 }
 
-function renderPlaces() {
-  const places = getFiltered();
-  const container = $("place-list");
-  const empty = $("empty-state");
+function renderPlaces(targetId = "place-list", emptyId = "empty-state", context = {}) {
+  const places = getFiltered(context);
+  const container = $(targetId);
+  const empty = $(emptyId);
 
   if (!places.length) {
     container.innerHTML = "";
@@ -288,23 +406,38 @@ function renderPlaces() {
   }
 
   empty.style.display = "none";
-  container.innerHTML = places.map(place => {
-    const review = placeNeedsReview(place);
-    const tagLabel = place.tags.length ? place.tags.map(tag => esc(tag)).join(" - ") : esc(place.source);
-    const meta = `${place.type || "Other"} - ${cityLabel(place)}${review ? " - needs details" : ""}`;
+  container.innerHTML = places.map(place => renderPlaceItem(place, context)).join("");
+}
 
-    return `
-      <article class="place-item${review ? " needs-review" : ""}" data-id="${esc(place.id)}">
-        <div class="place-meta">
-          <span>${esc(meta)}</span>
-          <span>${formatDate(place.dateAdded)}</span>
-        </div>
-        <h2 class="place-name">${esc(place.name)}</h2>
-        <p class="place-address">${esc(locationLabel(place))}</p>
-        <div class="place-tags">${tagLabel}</div>
-      </article>
-    `;
-  }).join("");
+function renderPlaceItem(place, context = {}) {
+  const review = placeNeedsReview(place);
+  const tagLabel = place.tags.length ? place.tags.map(tag => esc(tag)).join(" - ") : esc(place.source);
+  const meta = `${place.type || "Other"} - ${cityLabel(place)}${review ? " - needs details" : ""}`;
+  const removeAction = context.listId ? `
+    <button class="row-action" data-action="remove-from-list" data-list-id="${esc(context.listId)}" data-place-id="${esc(place.id)}" type="button">Remove from list</button>
+  ` : "";
+
+  return `
+    <article class="place-item${review ? " needs-review" : ""}" data-id="${esc(place.id)}">
+      <div class="place-meta">
+        <span>${esc(meta)}</span>
+        <span>${formatDate(place.dateAdded)}</span>
+      </div>
+      <h2 class="place-name">${esc(place.name)}</h2>
+      <p class="place-address">${esc(locationLabel(place))}</p>
+      <div class="place-tags">${tagLabel}</div>
+      ${removeAction}
+    </article>
+  `;
+}
+
+function renderPlaceBrowser(ids, context = {}) {
+  ensureFilterState(context);
+  renderStats(ids.stats, context);
+  renderTypeFilters(ids.typeFilters, context);
+  renderCityFilters(ids.cityFilters, context);
+  renderSort(ids.sort, context);
+  renderPlaces(ids.placeList, ids.empty, context);
 }
 
 function getNearby(place) {
@@ -312,6 +445,322 @@ function getNearby(place) {
   return state.places
     .filter(candidate => candidate.id !== place.id && candidate.city === place.city && candidate.state === place.state)
     .slice(0, 4);
+}
+
+function renderScreen(options = {}) {
+  const overlay = $("detail-overlay");
+  const container = $("detail-content");
+  const screen = getCurrentScreen();
+
+  destroyDetailMap();
+
+  if (!screen) {
+    overlay.classList.remove("active");
+    document.body.classList.remove("no-scroll");
+    container.className = "overlay-content";
+    container.innerHTML = "";
+    state.currentPlaceId = null;
+    return;
+  }
+
+  overlay.classList.add("active");
+  document.body.classList.add("no-scroll");
+  if (screen.type !== "place-detail") {
+    state.currentPlaceId = null;
+  }
+  if (options.resetScroll) {
+    overlay.scrollTop = 0;
+  }
+
+  if (screen.type === "lists") {
+    renderListsIndex();
+  } else if (screen.type === "list-detail") {
+    renderListDetail(screen.listId);
+  } else if (screen.type === "place-picker") {
+    renderPlacePicker(screen.listId);
+  } else if (screen.type === "place-detail") {
+    const place = state.places.find(candidate => candidate.id === String(screen.placeId));
+    if (!place) {
+      closeTopScreen();
+      return;
+    }
+    state.currentPlaceId = place.id;
+    renderDetail(place);
+  }
+
+  if (options.resetScroll) {
+    container.classList.remove("screen-enter");
+    requestAnimationFrame(() => container.classList.add("screen-enter"));
+  }
+}
+
+function pushScreen(screen) {
+  if (screen.type !== "place-detail") {
+    state.isEditing = false;
+    state.pendingDeleteId = null;
+    state.listChooserPlaceId = null;
+  }
+
+  state.screenStack.push(screen);
+  renderScreen({ resetScroll: true });
+}
+
+function closeTopScreen() {
+  state.screenStack.pop();
+  state.isEditing = false;
+  state.pendingDeleteId = null;
+  state.listChooserPlaceId = null;
+  state.pickerSearch = "";
+  renderScreen({ resetScroll: true });
+  renderAll();
+}
+
+function showLists() {
+  state.isCreatingList = false;
+  pushScreen({ type: "lists" });
+}
+
+function showListDetail(listId) {
+  const list = getList(listId);
+  if (!list) return;
+
+  state.listSearch = "";
+  state.listTypeFilter = "All";
+  state.listCityFilter = "All";
+  state.listSortIndex = state.sortIndex;
+  pushScreen({ type: "list-detail", listId: list.id });
+}
+
+function showPlacePicker(listId) {
+  const list = getList(listId);
+  if (!list) return;
+
+  state.pickerSearch = "";
+  pushScreen({ type: "place-picker", listId: list.id });
+}
+
+function renderListsIndex() {
+  const container = $("detail-content");
+  container.className = "overlay-content list-screen";
+  container.innerHTML = `
+    <button class="back-btn" data-action="back" type="button">Back</button>
+
+    <header class="screen-header">
+      <h1 class="detail-name">lists</h1>
+      <p class="detail-meta">${state.lists.length} ${state.lists.length === 1 ? "list" : "lists"}</p>
+    </header>
+
+    <div class="list-actions">
+      ${state.isCreatingList ? renderCreateListForm() : `<button class="action-link" data-action="show-create-list" type="button">New list</button>`}
+    </div>
+
+    <div class="saved-lists">
+      ${state.lists.length ? state.lists.map(renderListItem).join("") : `<div class="empty-state inline-empty">No lists yet.</div>`}
+    </div>
+  `;
+
+  if (state.isCreatingList) {
+    requestAnimationFrame(() => $("new-list-name")?.focus());
+  }
+}
+
+function renderCreateListForm() {
+  return `
+    <form class="inline-form" id="list-create-form">
+      <label class="field">
+        <span>List name</span>
+        <input id="new-list-name" name="name" autocomplete="off">
+      </label>
+      <div class="form-actions compact">
+        <button class="action-link" type="submit">Create</button>
+        <button class="action-link muted" data-action="cancel-create-list" type="button">Cancel</button>
+      </div>
+    </form>
+  `;
+}
+
+function renderListItem(list) {
+  const places = getListPlaces(list);
+  const count = places.length;
+  const city = getMainCityLabel(places);
+
+  return `
+    <article class="list-item" data-list-id="${esc(list.id)}">
+      <div>
+        <h2 class="place-name">${esc(list.name)}</h2>
+        <p class="place-address">${count} ${count === 1 ? "place" : "places"} - ${esc(city)}</p>
+      </div>
+      <span class="list-arrow">View</span>
+    </article>
+  `;
+}
+
+function getMainCityLabel(places) {
+  if (!places.length) return "No places yet";
+
+  const counts = new Map();
+  for (const place of places) {
+    const label = cityLabel(place);
+    counts.set(label, (counts.get(label) || 0) + 1);
+  }
+
+  return Array.from(counts.entries())
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0][0];
+}
+
+function renderListDetail(listId) {
+  const list = getList(listId);
+  const container = $("detail-content");
+  if (!list) {
+    container.className = "overlay-content";
+    container.innerHTML = `
+      <button class="back-btn" data-action="back" type="button">Back</button>
+      <h1 class="detail-name">List not found</h1>
+    `;
+    return;
+  }
+
+  const context = { listId: list.id };
+  container.className = "overlay-content detail-view";
+  container.innerHTML = `
+    <div class="detail-map-container"><div class="detail-map" id="detail-map"></div></div>
+
+    <div class="detail-body">
+      <button class="back-btn" data-action="back" type="button">Back</button>
+
+      <header class="screen-header">
+        <h1 class="detail-name">${esc(list.name)}</h1>
+        <p class="detail-meta" id="list-stats"></p>
+      </header>
+
+      <button class="action-link list-add-control" data-action="add-place-to-list" data-list-id="${esc(list.id)}" type="button">Add place</button>
+
+      <div class="input-wrap">
+        <div class="input-field">
+          <input type="text" id="list-input" placeholder="search this list..." autocomplete="off" spellcheck="false" value="${esc(state.listSearch)}">
+        </div>
+        <div id="list-input-status"></div>
+      </div>
+
+      <nav class="filter-row" id="list-type-filters" aria-label="Place types"></nav>
+      <nav class="filter-row" id="list-city-filters" aria-label="Cities"></nav>
+      <button class="sort-control" id="list-sort-btn" data-action="sort" type="button"></button>
+      <div id="list-place-list"></div>
+      <div class="empty-state" id="list-empty-state">No places found.</div>
+    </div>
+  `;
+
+  renderPlaceBrowser({
+    stats: "list-stats",
+    typeFilters: "list-type-filters",
+    cityFilters: "list-city-filters",
+    sort: "list-sort-btn",
+    placeList: "list-place-list",
+    empty: "list-empty-state"
+  }, context);
+  renderListDetailMap(getFiltered(context));
+}
+
+function refreshListDetailResults(listId) {
+  const context = { listId };
+  renderPlaceBrowser({
+    stats: "list-stats",
+    typeFilters: "list-type-filters",
+    cityFilters: "list-city-filters",
+    sort: "list-sort-btn",
+    placeList: "list-place-list",
+    empty: "list-empty-state"
+  }, context);
+  destroyDetailMap();
+  renderListDetailMap(getFiltered(context));
+}
+
+function renderListDetailMap(places) {
+  const Leaflet = globalThis.L;
+  const container = $("detail-map");
+  if (!container) return;
+  if (!Leaflet) {
+    container.innerHTML = `<div class="map-empty">Map unavailable.</div>`;
+    return;
+  }
+
+  detailMap = Leaflet.map(container, {
+    zoomControl: false,
+    attributionControl: true
+  }).setView([20, 0], 2);
+
+  Leaflet.tileLayer(TILE_LAYER_URL, TILE_LAYER_OPTIONS).addTo(detailMap);
+
+  const bounds = [];
+  for (const place of places.filter(hasCoordinates)) {
+    const marker = Leaflet.circleMarker([place.lat, place.lng], {
+      ...PLACE_MARKER_STYLE
+    });
+
+    marker.bindTooltip(place.name, {
+      direction: "top",
+      offset: [0, -8],
+      className: "place-tooltip"
+    });
+    marker.on("click", () => showDetail(place.id));
+    marker.addTo(detailMap);
+    bounds.push([place.lat, place.lng]);
+  }
+
+  requestAnimationFrame(() => {
+    detailMap?.invalidateSize();
+    fitMapToBounds(detailMap, bounds);
+  });
+}
+
+function renderPlacePicker(listId) {
+  const list = getList(listId);
+  const container = $("detail-content");
+  if (!list) {
+    closeTopScreen();
+    return;
+  }
+
+  const selected = new Set(list.placeIds);
+  const query = state.pickerSearch.toLowerCase();
+  const places = state.places
+    .filter(place => !selected.has(place.id))
+    .filter(place => !query || placeMatchesSearch(place, query))
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  container.className = "overlay-content list-screen";
+  container.innerHTML = `
+    <button class="back-btn" data-action="back" type="button">Back</button>
+
+    <header class="screen-header">
+      <h1 class="detail-name">Add place</h1>
+      <p class="detail-meta">${esc(list.name)}</p>
+    </header>
+
+    <div class="input-wrap">
+      <div class="input-field">
+        <input type="text" id="place-picker-input" placeholder="search saved places..." autocomplete="off" spellcheck="false" value="${esc(state.pickerSearch)}">
+      </div>
+    </div>
+
+    <div class="picker-list">
+      ${places.length ? places.map(place => `
+        <article class="picker-item" data-action="choose-place-for-list" data-list-id="${esc(list.id)}" data-place-id="${esc(place.id)}">
+          <h2 class="place-name">${esc(place.name)}</h2>
+          <p class="place-address">${esc(locationLabel(place))}</p>
+          <div class="place-tags">${esc(place.type || "Other")} - ${esc(cityLabel(place))}</div>
+        </article>
+      `).join("") : `<div class="empty-state inline-empty">No saved places to add.</div>`}
+    </div>
+  `;
+
+  requestAnimationFrame(() => {
+    const input = $("place-picker-input");
+    if (input) {
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+    }
+  });
 }
 
 function renderDetail(place) {
@@ -343,8 +792,10 @@ function renderDetail(place) {
       <p class="detail-tags">${place.tags.map(tag => esc(tag)).join(" - ")}</p>
 
       <hr class="detail-rule">
+      ${renderPlaceListsSection(place)}
 
       ${nearby.length ? `
+        <hr class="detail-rule">
         <div class="section-label">Nearby in ${esc(place.city)}</div>
         ${nearby.map(candidate => `
           <div class="nearby-item" data-id="${esc(candidate.id)}">
@@ -352,9 +803,9 @@ function renderDetail(place) {
             <span class="nearby-meta">${esc(candidate.type)} - ${esc(locationLabel(candidate))}</span>
           </div>
         `).join("")}
-        <hr class="detail-rule">
       ` : ""}
 
+      <hr class="detail-rule">
       <div class="detail-actions">
         <button class="action-link" data-action="edit" type="button">Edit</button>
         <a class="action-link muted" href="${esc(place.canonicalUrl || place.url)}" target="_blank" rel="noopener">Website</a>
@@ -364,6 +815,40 @@ function renderDetail(place) {
   `;
 
   renderDetailMap(place);
+}
+
+function renderPlaceListsSection(place) {
+  const lists = getListsForPlace(place.id);
+  const chips = lists.length
+    ? lists.map(list => `<span class="list-chip">${esc(list.name)}</span>`).join("")
+    : `<span class="detail-empty">No lists yet.</span>`;
+  const chooser = state.listChooserPlaceId === place.id ? renderListChooser(place) : "";
+
+  return `
+    <div class="section-label">Lists</div>
+    <div class="list-chip-row">${chips}</div>
+    <button class="action-link" data-action="${state.lists.length ? "toggle-list-chooser" : "open-lists"}" data-place-id="${esc(place.id)}" type="button">Add to list</button>
+    ${chooser}
+  `;
+}
+
+function renderListChooser(place) {
+  if (!state.lists.length) {
+    return `<div class="detail-empty">Create a list first.</div>`;
+  }
+
+  return `
+    <div class="list-toggle-grid">
+      ${state.lists.map(list => {
+        const active = list.placeIds.includes(place.id);
+        return `
+          <button class="list-toggle${active ? " active" : ""}" data-action="toggle-list-membership" data-list-id="${esc(list.id)}" data-place-id="${esc(place.id)}" type="button">
+            ${esc(list.name)}
+          </button>
+        `;
+      }).join("")}
+    </div>
+  `;
 }
 
 function renderDetailMap(place) {
@@ -493,21 +978,14 @@ function showDetail(id, options = {}) {
   state.currentPlaceId = place.id;
   state.isEditing = Boolean(options.edit);
   state.pendingDeleteId = null;
-  renderDetail(place);
-  $("detail-overlay").classList.add("active");
-  $("detail-overlay").scrollTop = 0;
-  document.body.classList.add("no-scroll");
+  state.listChooserPlaceId = null;
+  pushScreen({ type: "place-detail", placeId: place.id });
 }
 
 function goBack() {
   if (!$("detail-overlay").classList.contains("active")) return;
-  destroyDetailMap();
-  $("detail-overlay").classList.remove("active");
-  document.body.classList.remove("no-scroll");
-  state.currentPlaceId = null;
-  state.isEditing = false;
-  state.pendingDeleteId = null;
-  renderAll();
+  if (state.isEditing) return cancelEdit();
+  closeTopScreen();
 }
 
 function startEdit() {
@@ -515,7 +993,7 @@ function startEdit() {
   if (!place) return;
   state.isEditing = true;
   state.pendingDeleteId = null;
-  renderDetail(place);
+  renderScreen();
 }
 
 function cancelEdit() {
@@ -523,7 +1001,7 @@ function cancelEdit() {
   if (!place) return goBack();
 
   state.isEditing = false;
-  renderDetail(place);
+  renderScreen();
 }
 
 async function saveEditForm(form) {
@@ -563,7 +1041,7 @@ async function saveEditForm(form) {
   state.isEditing = false;
   save();
   renderAll();
-  renderDetail(next);
+  renderScreen();
   toast(next.status === "ready" ? "Place updated" : "Place saved; details still needed");
 }
 
@@ -629,14 +1107,14 @@ function requestDeleteCurrentPlace() {
   const place = getCurrentPlace();
   if (!place) return;
   state.pendingDeleteId = place.id;
-  renderDetail(place);
+  renderScreen();
 }
 
 function cancelDeleteCurrentPlace() {
   const place = getCurrentPlace();
   if (!place) return;
   state.pendingDeleteId = null;
-  renderDetail(place);
+  renderScreen();
 }
 
 function deleteCurrentPlace() {
@@ -644,14 +1122,18 @@ function deleteCurrentPlace() {
   if (!place) return;
 
   state.places = state.places.filter(candidate => candidate.id !== place.id);
+  state.lists = state.lists.map(list => ({
+    ...list,
+    placeIds: list.placeIds.filter(id => id !== place.id)
+  }));
+  state.screenStack = state.screenStack.filter(screen => screen.type !== "place-detail" || screen.placeId !== place.id);
   state.currentPlaceId = null;
   state.pendingDeleteId = null;
   state.isEditing = false;
+  state.listChooserPlaceId = null;
   save();
 
-  destroyDetailMap();
-  $("detail-overlay").classList.remove("active");
-  document.body.classList.remove("no-scroll");
+  renderScreen({ resetScroll: true });
   renderAll();
   toast("Place removed");
 }
@@ -677,7 +1159,7 @@ async function addPlace(url) {
     save();
     renderAll();
 
-    const newElement = placeElement(addedPlace.id);
+    const newElement = placeElement(addedPlace.id, $("place-list"));
     newElement?.classList.add("animate-in");
 
     if (placeNeedsReview(addedPlace)) {
@@ -730,6 +1212,76 @@ function upsertPlace(place) {
   return place;
 }
 
+function createList(form) {
+  const data = new FormData(form);
+  const name = formString(data, "name");
+
+  if (!name) {
+    toast("Name required");
+    return;
+  }
+
+  if (state.lists.some(list => list.name.toLowerCase() === name.toLowerCase())) {
+    toast("List already exists");
+    return;
+  }
+
+  state.lists.push({
+    id: crypto.randomUUID(),
+    name,
+    placeIds: [],
+    dateCreated: new Date().toISOString()
+  });
+  state.isCreatingList = false;
+  save();
+  renderScreen();
+  renderAll();
+  toast("List created");
+}
+
+function addPlaceToList(listId, placeId) {
+  const list = getList(listId);
+  const place = state.places.find(candidate => candidate.id === String(placeId));
+  if (!list || !place || list.placeIds.includes(place.id)) return;
+
+  list.placeIds.push(place.id);
+  save();
+  closeTopScreen();
+  toast("Place added to list");
+}
+
+function removePlaceFromList(listId, placeId) {
+  const list = getList(listId);
+  if (!list) return;
+
+  const nextIds = list.placeIds.filter(id => id !== String(placeId));
+  if (nextIds.length === list.placeIds.length) return;
+
+  list.placeIds = nextIds;
+  save();
+  renderScreen();
+  renderAll();
+  toast("Removed from list");
+}
+
+function toggleListMembership(listId, placeId) {
+  const list = getList(listId);
+  const place = state.places.find(candidate => candidate.id === String(placeId));
+  if (!list || !place) return;
+
+  if (list.placeIds.includes(place.id)) {
+    list.placeIds = list.placeIds.filter(id => id !== place.id);
+    toast("Removed from list");
+  } else {
+    list.placeIds.push(place.id);
+    toast("Added to list");
+  }
+
+  save();
+  renderAll();
+  renderScreen();
+}
+
 function renderAll() {
   renderStats();
   renderTypeFilters();
@@ -739,9 +1291,17 @@ function renderAll() {
   updateMarkers();
 }
 
+function getContextFromElement(element) {
+  return element.closest("#detail-content") && getCurrentScreen()?.type === "list-detail"
+    ? { listId: getCurrentScreen().listId }
+    : {};
+}
+
 function bindEvents() {
   const input = $("main-input");
   const status = $("input-status");
+
+  $("lists-btn").addEventListener("click", showLists);
 
   input.addEventListener("input", () => {
     const value = input.value.trim();
@@ -781,8 +1341,7 @@ function bindEvents() {
   $("type-filters").addEventListener("click", event => {
     const item = event.target.closest(".cat-item");
     if (!item) return;
-    state.typeFilter = item.dataset.type;
-    save();
+    setTypeFilter({}, item.dataset.type);
     renderTypeFilters();
     renderPlaces();
     updateMarkers();
@@ -791,16 +1350,14 @@ function bindEvents() {
   $("city-filters").addEventListener("click", event => {
     const item = event.target.closest(".cat-item");
     if (!item) return;
-    state.cityFilter = item.dataset.city;
-    save();
+    setCityFilter({}, item.dataset.city);
     renderCityFilters();
     renderPlaces();
     updateMarkers();
   });
 
   $("sort-btn").addEventListener("click", () => {
-    state.sortIndex = (state.sortIndex + 1) % SORTS.length;
-    save();
+    advanceSort({});
     renderSort();
     renderPlaces();
     updateMarkers();
@@ -821,22 +1378,83 @@ function bindEvents() {
     if (item) unhighlightMarker(item.dataset.id);
   });
 
+  $("detail-content").addEventListener("input", event => {
+    if (event.target.id === "list-input") {
+      state.listSearch = event.target.value.trim();
+      const current = getCurrentScreen();
+      if (current?.type === "list-detail") {
+        refreshListDetailResults(current.listId);
+      }
+    }
+
+    if (event.target.id === "place-picker-input") {
+      state.pickerSearch = event.target.value.trim();
+      renderScreen();
+    }
+  });
+
   $("detail-content").addEventListener("submit", event => {
-    if (event.target.id !== "place-edit-form") return;
-    event.preventDefault();
-    saveEditForm(event.target);
+    if (event.target.id === "place-edit-form") {
+      event.preventDefault();
+      saveEditForm(event.target);
+    }
+
+    if (event.target.id === "list-create-form") {
+      event.preventDefault();
+      createList(event.target);
+    }
   });
 
   $("detail-content").addEventListener("click", event => {
     const action = event.target.closest("[data-action]");
     if (action) {
+      const current = getCurrentScreen();
+
       if (action.dataset.action === "back") return goBack();
       if (action.dataset.action === "edit") return startEdit();
       if (action.dataset.action === "cancel-edit") return cancelEdit();
       if (action.dataset.action === "request-delete") return requestDeleteCurrentPlace();
       if (action.dataset.action === "confirm-delete") return deleteCurrentPlace();
       if (action.dataset.action === "cancel-delete") return cancelDeleteCurrentPlace();
+      if (action.dataset.action === "open-lists") return showLists();
+      if (action.dataset.action === "show-create-list") {
+        state.isCreatingList = true;
+        return renderScreen();
+      }
+      if (action.dataset.action === "cancel-create-list") {
+        state.isCreatingList = false;
+        return renderScreen();
+      }
+      if (action.dataset.action === "add-place-to-list") return showPlacePicker(action.dataset.listId);
+      if (action.dataset.action === "choose-place-for-list") return addPlaceToList(action.dataset.listId, action.dataset.placeId);
+      if (action.dataset.action === "remove-from-list") return removePlaceFromList(action.dataset.listId, action.dataset.placeId);
+      if (action.dataset.action === "toggle-list-chooser") {
+        state.listChooserPlaceId = state.listChooserPlaceId === action.dataset.placeId ? null : action.dataset.placeId;
+        return renderScreen();
+      }
+      if (action.dataset.action === "toggle-list-membership") return toggleListMembership(action.dataset.listId, action.dataset.placeId);
+      if (action.dataset.action === "type-filter") {
+        const context = getContextFromElement(action);
+        setTypeFilter(context, action.dataset.type);
+        return context.listId ? renderScreen() : renderAll();
+      }
+      if (action.dataset.action === "city-filter") {
+        const context = getContextFromElement(action);
+        setCityFilter(context, action.dataset.city);
+        return context.listId ? renderScreen() : renderAll();
+      }
+      if (action.dataset.action === "sort") {
+        const context = current?.type === "list-detail" ? { listId: current.listId } : {};
+        advanceSort(context);
+        return context.listId ? renderScreen() : renderAll();
+      }
     }
+
+    const listItem = event.target.closest(".list-item");
+    if (listItem) return showListDetail(listItem.dataset.listId);
+
+    const placeItem = event.target.closest(".place-item");
+    if (placeItem) return showDetail(placeItem.dataset.id);
 
     const nearby = event.target.closest(".nearby-item");
     if (!nearby) return;
