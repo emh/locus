@@ -27,6 +27,22 @@ let isProcessing = false;
 let toastTimer;
 let markerMap = new Map();
 
+const TILE_LAYER_URL = "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png";
+const TILE_LAYER_OPTIONS = {
+  attribution: "&copy; OpenStreetMap &copy; CARTO",
+  subdomains: "abcd",
+  maxZoom: 19
+};
+
+const PLACE_MARKER_STYLE = {
+  radius: 6,
+  fillColor: "#8b0000",
+  fillOpacity: 0.8,
+  color: "#fffff8",
+  weight: 2,
+  opacity: 1
+};
+
 function esc(value) {
   const div = document.createElement("div");
   div.textContent = value == null ? "" : String(value);
@@ -114,11 +130,7 @@ function initMap() {
     attributionControl: true
   }).setView([20, 0], 2);
 
-  Leaflet.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {
-    attribution: "&copy; OpenStreetMap &copy; CARTO",
-    subdomains: "abcd",
-    maxZoom: 19
-  }).addTo(map);
+  Leaflet.tileLayer(TILE_LAYER_URL, TILE_LAYER_OPTIONS).addTo(map);
 
   markerLayer = Leaflet.layerGroup().addTo(map);
   requestAnimationFrame(() => map.invalidateSize());
@@ -136,12 +148,7 @@ function updateMarkers() {
 
   for (const place of places) {
     const marker = Leaflet.circleMarker([place.lat, place.lng], {
-      radius: 6,
-      fillColor: "#8b0000",
-      fillOpacity: 0.8,
-      color: "#fffff8",
-      weight: 2,
-      opacity: 1
+      ...PLACE_MARKER_STYLE
     });
 
     marker.bindTooltip(place.name, {
@@ -315,39 +322,44 @@ function renderDetail(place) {
     return;
   }
 
+  container.className = "overlay-content detail-view";
+
   const nearby = getNearby(place);
   const review = placeNeedsReview(place);
   const description = place.description || "No description yet.";
 
   container.innerHTML = `
-    <button class="back-btn" data-action="back" type="button">Back</button>
+    ${hasCoordinates(place) ? `<div class="detail-map-container"><div class="detail-map" id="detail-map"></div></div>` : ""}
 
-    ${hasCoordinates(place) ? `<div class="detail-map" id="detail-map"></div>` : ""}
-    <h1 class="detail-name">${esc(place.name)}</h1>
-    <p class="detail-address">${esc(locationLabel(place))}</p>
-    <p class="detail-meta">${esc(place.type || "Other")} - ${esc(cityLabel(place))} - ${formatDate(place.dateAdded)}</p>
+    <div class="detail-body">
+      <button class="back-btn" data-action="back" type="button">Back</button>
 
-    ${review ? `<p class="detail-notice">Add missing details before the map pin is reliable.</p>` : ""}
-    <p class="detail-description">${esc(description)}</p>
-    <p class="detail-tags">${place.tags.map(tag => esc(tag)).join(" - ")}</p>
+      <h1 class="detail-name">${esc(place.name)}</h1>
+      <p class="detail-address">${esc(locationLabel(place))}</p>
+      <p class="detail-meta">${esc(place.type || "Other")} - ${esc(cityLabel(place))} - ${formatDate(place.dateAdded)}</p>
 
-    <hr class="detail-rule">
+      ${review ? `<p class="detail-notice">Add missing details before the map pin is reliable.</p>` : ""}
+      <p class="detail-description">${esc(description)}</p>
+      <p class="detail-tags">${place.tags.map(tag => esc(tag)).join(" - ")}</p>
 
-    ${nearby.length ? `
-      <div class="section-label">Nearby in ${esc(place.city)}</div>
-      ${nearby.map(candidate => `
-        <div class="nearby-item" data-id="${esc(candidate.id)}">
-          <span class="nearby-title">${esc(candidate.name)}</span>
-          <span class="nearby-meta">${esc(candidate.type)} - ${esc(locationLabel(candidate))}</span>
-        </div>
-      `).join("")}
       <hr class="detail-rule">
-    ` : ""}
 
-    <div class="detail-actions">
-      <button class="action-link" data-action="edit" type="button">Edit</button>
-      <a class="action-link muted" href="${esc(place.canonicalUrl || place.url)}" target="_blank" rel="noopener">Website</a>
-      ${renderDeleteAction(place)}
+      ${nearby.length ? `
+        <div class="section-label">Nearby in ${esc(place.city)}</div>
+        ${nearby.map(candidate => `
+          <div class="nearby-item" data-id="${esc(candidate.id)}">
+            <span class="nearby-title">${esc(candidate.name)}</span>
+            <span class="nearby-meta">${esc(candidate.type)} - ${esc(locationLabel(candidate))}</span>
+          </div>
+        `).join("")}
+        <hr class="detail-rule">
+      ` : ""}
+
+      <div class="detail-actions">
+        <button class="action-link" data-action="edit" type="button">Edit</button>
+        <a class="action-link muted" href="${esc(place.canonicalUrl || place.url)}" target="_blank" rel="noopener">Website</a>
+        ${renderDeleteAction(place)}
+      </div>
     </div>
   `;
 
@@ -361,30 +373,20 @@ function renderDetailMap(place) {
 
   detailMap = Leaflet.map(container, {
     zoomControl: false,
-    attributionControl: false,
-    dragging: false,
-    scrollWheelZoom: false,
-    doubleClickZoom: false,
-    boxZoom: false,
-    keyboard: false,
-    tap: false,
-    touchZoom: false
+    attributionControl: true
   }).setView([place.lat, place.lng], 17);
 
-  Leaflet.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {
-    attribution: "&copy; OpenStreetMap &copy; CARTO",
-    subdomains: "abcd",
-    maxZoom: 19
+  Leaflet.tileLayer(TILE_LAYER_URL, TILE_LAYER_OPTIONS).addTo(detailMap);
+
+  const marker = Leaflet.circleMarker([place.lat, place.lng], {
+    ...PLACE_MARKER_STYLE
   }).addTo(detailMap);
 
-  Leaflet.circleMarker([place.lat, place.lng], {
-    radius: 7,
-    fillColor: "#8b0000",
-    fillOpacity: 0.85,
-    color: "#fffff8",
-    weight: 2,
-    opacity: 1
-  }).addTo(detailMap);
+  marker.bindTooltip(place.name, {
+    direction: "top",
+    offset: [0, -8],
+    className: "place-tooltip"
+  });
 
   requestAnimationFrame(() => detailMap?.invalidateSize());
 }
@@ -409,7 +411,9 @@ function renderDeleteAction(place) {
 
 function renderEditForm(place) {
   destroyDetailMap();
-  $("detail-content").innerHTML = `
+  const container = $("detail-content");
+  container.className = "overlay-content";
+  container.innerHTML = `
     <button class="back-btn" data-action="cancel-edit" type="button">Back</button>
 
     <h1 class="detail-name">Edit</h1>
