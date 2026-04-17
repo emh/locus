@@ -50,7 +50,7 @@ async function geocode(place, env) {
 
     const results = await response.json();
     const result = normalizeResult(pickResult(Array.isArray(results) ? results : [], place, query));
-    if (result.status === "ready") {
+    if (result.status === "ready" || result.status === "approximate") {
       await writeCache(queries, result);
       return result;
     }
@@ -77,6 +77,8 @@ function buildQueries(place) {
   const name = cleanPlaceName(place.name);
   const address = String(place.address || "").trim();
   const simpleAddress = simplifyAddress(address);
+  const streetAddress = streetAddressLine(simpleAddress || address);
+  const roadAddress = roadAddressLine(streetAddress);
   const city = String(place.city || "").trim();
   const state = String(place.state || "").trim();
   const country = normalizeCountry(String(place.country || "").trim());
@@ -87,6 +89,13 @@ function buildQueries(place) {
   if (simpleAddress && simpleAddress !== address) {
     addQuery(queries, [name, simpleAddress, city, state, country]);
     addQuery(queries, [simpleAddress, city, state, country]);
+  }
+  if (streetAddress && streetAddress !== address && streetAddress !== simpleAddress) {
+    addQuery(queries, [name, streetAddress, city, state, country]);
+    addQuery(queries, [streetAddress, city, state, country]);
+  }
+  if (roadAddress && roadAddress !== streetAddress) {
+    addQuery(queries, [roadAddress, city, state, country]);
   }
   if (name && city) addQuery(queries, [name, city, state, country]);
 
@@ -112,6 +121,16 @@ function simplifyAddress(address) {
     .replace(/#\s*/g, " ")
     .replace(/\s+/g, " ")
     .replace(/\s+,/g, ",")
+    .trim();
+}
+
+function streetAddressLine(address) {
+  return String(address || "").split(",")[0]?.trim() || "";
+}
+
+function roadAddressLine(address) {
+  return String(address || "")
+    .replace(/^\d+[a-z]?\s+/i, "")
     .trim();
 }
 
@@ -224,7 +243,7 @@ function normalizeResult(result) {
   }
 
   return {
-    status: "ready",
+    status: isApproximateResult(result) ? "approximate" : "ready",
     name: result.name || namedAddressValue(address),
     lat,
     lng,
@@ -236,6 +255,16 @@ function normalizeResult(result) {
     osmType: result.osm_type || "",
     provider: "nominatim"
   };
+}
+
+function isApproximateResult(result) {
+  const category = String(result?.category || "").toLowerCase();
+  const type = String(result?.type || "").toLowerCase();
+  const addresstype = String(result?.addresstype || "").toLowerCase();
+
+  return category === "highway" ||
+    addresstype === "road" ||
+    ["road", "residential", "tertiary", "secondary", "primary", "service", "footway"].includes(type);
 }
 
 function namedAddressValue(address = {}) {
