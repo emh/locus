@@ -770,7 +770,7 @@ header h1 {
 .list-chip-row {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 8px 16px;
   align-items: center;
   min-height: 30px;
   margin-bottom: 4px;
@@ -779,8 +779,8 @@ header h1 {
 .list-chip,
 .list-toggle {
   display: inline-block;
-  padding: 5px 10px;
-  border: 1px solid var(--rule);
+  padding: 5px 0;
+  border: none;
   background: transparent;
   color: var(--ink-mid);
   font-family: var(--mono);
@@ -791,23 +791,21 @@ header h1 {
 
 .list-toggle {
   cursor: pointer;
-  transition: border-color 0.15s, color 0.15s;
+  transition: color 0.15s;
 }
 
 .list-toggle:hover {
-  border-color: var(--ink-faint);
   color: var(--ink);
 }
 
 .list-toggle.active {
-  border-color: var(--red);
   color: var(--red);
 }
 
 .list-toggle-grid {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 8px 16px;
   margin-top: 12px;
 }
 

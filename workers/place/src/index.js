@@ -1,4 +1,47 @@
 const DEFAULT_OPENAI_MODEL = "gpt-5";
+const PLACE_TYPE_RULES = [
+  ["bakery", /\b(bakery|boulangerie|patisserie|p\u00e2tisserie|pastry shop)\b/],
+  ["cafe", /\b(caf[e\u00e9]|coffee shop|coffeehouse|tea house|tearoom)\b/],
+  ["restaurant", /\b(restaurant|diner|bistro|brasserie|trattoria|pizzeria|taqueria|izakaya|ramen|sushi|omakase|yakitori|steakhouse|eatery|food hall|noodle|noodles|bbq|barbecue|tapas|fine dining)\b/],
+  ["bar", /\b(cocktail bar|wine bar|bar|pub|brewery|taproom|biergarten|speakeasy|lounge)\b/],
+  ["museum", /\b(museum)\b/],
+  ["gallery", /\b(gallery)\b/],
+  ["gym", /\b(gym|fitness|fitness center|fitness centre|yoga studio|pilates studio)\b/],
+  ["bookstore", /\b(bookstore|bookshop)\b/],
+  ["market", /\b(market|grocery|supermarket|farmers market|food market)\b/],
+  ["hotel", /\b(hotel|motel|inn|resort|hostel)\b/],
+  ["park", /\b(park|garden|playground|beach)\b/],
+  ["music venue", /\b(music venue|concert hall|live music|jazz club)\b/],
+  ["theater", /\b(theater|theatre|cinema|movie theater|movie theatre)\b/],
+  ["shop", /\b(shop|store|boutique|retailer|florist)\b/],
+  ["salon", /\b(salon|barbershop|barber shop)\b/],
+  ["spa", /\b(spa)\b/],
+  ["library", /\b(library)\b/],
+  ["school", /\b(school|college|university)\b/],
+  ["venue", /\b(venue|event space|event hall)\b/]
+];
+
+const BROAD_PLACE_TYPES = new Set([
+  "restaurant",
+  "bar",
+  "cafe",
+  "bakery",
+  "museum",
+  "gallery",
+  "gym",
+  "bookstore",
+  "market",
+  "hotel",
+  "park",
+  "music venue",
+  "theater",
+  "shop",
+  "salon",
+  "spa",
+  "library",
+  "school",
+  "venue"
+]);
 
 export default {
   async fetch(request, env) {
@@ -195,8 +238,9 @@ function systemPrompt() {
     "If the page is not about one specific physical place, set isRelevantPlace to false and leave unknown fields empty.",
     "For address, return a complete display address, preserving enough detail to identify the right city, state/province, postal code, and country when available.",
     "Actively look for exact decimal lat/lng coordinates on the official site, map pages, or search results; leave them empty only when you cannot verify them.",
-    "Choose a concise place type yourself, for example restaurant, cocktail bar, museum, gym, bookstore, market, hotel, park, or music venue.",
-    "Put descriptive details in tags, not type. Do not invent missing facts.",
+    "Choose a broad top-level place type yourself, for example restaurant, bar, cafe, bakery, museum, gym, bookstore, market, hotel, park, or music venue.",
+    "Do not include cuisine, nationality, price point, ambience, menu item, brand category, or service level in type; put those descriptive details in tags instead. For example, use type restaurant and tags japanese and fine-dining instead of type Japanese fine dining restaurant.",
+    "Do not invent missing facts.",
     "Return structured output that exactly matches the schema."
   ].join(" ");
 }
@@ -214,7 +258,7 @@ function userPrompt(target) {
     "- city: locality only, without state, province, postal code, or country",
     "- state: state, province, prefecture, region, or equivalent administrative area when available",
     "- country: full country name when known",
-    "- type: concise model-chosen place type",
+    "- type: broad model-chosen place type, without descriptive modifiers",
     "- description: one short factual description",
     "- tags: short descriptive tags such as cuisine, atmosphere, specialty, collection, or activity",
     "- canonicalUrl: official website URL for the place when known, otherwise the supplied URL",
@@ -530,10 +574,21 @@ function deriveStatus(metadata, geocodeStatus, fields) {
   return "ready";
 }
 
-function cleanType(type) {
+export function cleanPlaceType(type) {
   const text = String(type || "").trim().replace(/\s+/g, " ");
-  if (!text) return "Other";
-  return text.length > 80 ? text.slice(0, 80).trim() : text;
+  const normalized = text.toLowerCase();
+  if (!normalized || normalized === "other") return "Other";
+
+  for (const [label, pattern] of PLACE_TYPE_RULES) {
+    if (pattern.test(normalized)) return label;
+  }
+
+  if (BROAD_PLACE_TYPES.has(normalized)) return normalized;
+  return normalized.length > 80 ? normalized.slice(0, 80).trim() : normalized;
+}
+
+function cleanType(type) {
+  return cleanPlaceType(type);
 }
 
 function safeUrl(input) {

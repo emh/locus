@@ -40,6 +40,7 @@ const state = {
   pendingDeleteId: null,
   screenStack: [],
   isCreatingList: false,
+  createListPlaceId: null,
   pickerSearch: "",
   listChooserPlaceId: null,
   listContributorFilter: "",
@@ -641,6 +642,7 @@ function pushScreen(screen) {
     state.isEditing = false;
     state.pendingDeleteId = null;
     state.listChooserPlaceId = null;
+    state.createListPlaceId = null;
   }
 
   state.screenStack.push(screen);
@@ -650,8 +652,10 @@ function pushScreen(screen) {
 function closeTopScreen() {
   state.screenStack.pop();
   state.isEditing = false;
+  state.isCreatingList = false;
   state.pendingDeleteId = null;
   state.listChooserPlaceId = null;
+  state.createListPlaceId = null;
   state.pickerSearch = "";
   renderScreen({ resetScroll: true, transition: true, direction: "back" });
   renderAll();
@@ -659,6 +663,7 @@ function closeTopScreen() {
 
 function showLists() {
   state.isCreatingList = false;
+  state.createListPlaceId = null;
   pushScreen({ type: "lists" });
 }
 
@@ -695,7 +700,7 @@ function renderListsIndex() {
     </header>
 
     <div class="list-actions">
-      ${state.isCreatingList ? renderCreateListForm() : `<button class="action-link" data-action="show-create-list" type="button">new list</button>`}
+      ${state.isCreatingList && !state.createListPlaceId ? renderCreateListForm() : `<button class="action-link" data-action="show-create-list" type="button">new list</button>`}
     </div>
 
     <div class="saved-lists">
@@ -708,9 +713,9 @@ function renderListsIndex() {
   }
 }
 
-function renderCreateListForm() {
+function renderCreateListForm(placeId = "") {
   return `
-    <form class="inline-form" id="list-create-form">
+    <form class="inline-form" id="list-create-form" data-place-id="${esc(placeId)}">
       <label class="field">
         <span>List name</span>
         <input id="new-list-name" name="name" autocomplete="off">
@@ -967,6 +972,9 @@ function renderDetail(place) {
   `;
 
   schedulePlaceDetailMap(place.id, place);
+  if (state.isCreatingList && state.createListPlaceId === place.id) {
+    requestAnimationFrame(() => $("new-list-name")?.focus());
+  }
 }
 
 function scheduleListDetailMap(listId, places) {
@@ -996,33 +1004,35 @@ function renderPlaceListsSection(place) {
   const chips = lists.length
     ? lists.map(list => `<span class="list-chip">${esc(list.name)}</span>`).join("")
     : `<span class="detail-empty">No lists yet.</span>`;
-  const chooser = state.listChooserPlaceId === place.id ? renderListChooser(place) : "";
+  const chooserOpen = state.listChooserPlaceId === place.id;
+  const chooser = chooserOpen ? renderListChooser(place) : "";
 
   return `
     <div class="section-label">Lists</div>
     <div class="list-chip-row">${chips}</div>
-    <button class="action-link" data-action="${visibleLists(state.lists).length ? "toggle-list-chooser" : "open-lists"}" data-place-id="${esc(place.id)}" type="button">add to list</button>
+    <button class="action-link" data-action="toggle-list-chooser" data-place-id="${esc(place.id)}" type="button" aria-expanded="${chooserOpen ? "true" : "false"}">add to list</button>
     ${chooser}
   `;
 }
 
 function renderListChooser(place) {
   const lists = visibleLists(state.lists);
-  if (!lists.length) {
-    return `<div class="detail-empty">Create a list first.</div>`;
-  }
+  const creating = state.isCreatingList && state.createListPlaceId === place.id;
 
   return `
-    <div class="list-toggle-grid">
-      ${lists.map(list => {
-        const active = Boolean(getListItem(list.id, place.id));
-        return `
-          <button class="list-toggle${active ? " active" : ""}" data-action="toggle-list-membership" data-list-id="${esc(list.id)}" data-place-id="${esc(place.id)}" type="button">
-            ${esc(list.name)}
-          </button>
-        `;
-      }).join("")}
-    </div>
+    ${lists.length ? `
+      <div class="list-toggle-grid">
+        ${lists.map(list => {
+          const active = Boolean(getListItem(list.id, place.id));
+          return `
+            <button class="list-toggle${active ? " active" : ""}" data-action="toggle-list-membership" data-list-id="${esc(list.id)}" data-place-id="${esc(place.id)}" type="button">
+              ${esc(list.name)}
+            </button>
+          `;
+        }).join("")}
+      </div>
+    ` : ""}
+    ${creating ? renderCreateListForm(place.id) : `<button class="action-link" data-action="show-create-list" data-place-id="${esc(place.id)}" type="button">new list</button>`}
   `;
 }
 
@@ -1152,8 +1162,10 @@ function showDetail(id, options = {}) {
 
   state.currentPlaceId = place.id;
   state.isEditing = Boolean(options.edit);
+  state.isCreatingList = false;
   state.pendingDeleteId = null;
   state.listChooserPlaceId = null;
+  state.createListPlaceId = null;
   pushScreen({ type: "place-detail", placeId: place.id });
 }
 
@@ -1450,6 +1462,7 @@ function deleteCurrentPlace() {
   state.pendingDeleteId = null;
   state.isEditing = false;
   state.listChooserPlaceId = null;
+  state.createListPlaceId = null;
   commitChanges(changes, "Place removed");
 }
 
@@ -1557,6 +1570,8 @@ function createList(form) {
 
   const data = new FormData(form);
   const name = formString(data, "name");
+  const placeId = String(form.dataset.placeId || state.createListPlaceId || "");
+  const place = placeId ? visiblePlaces(state.places).find(candidate => candidate.id === placeId) : null;
 
   if (!name) {
     toast("Name required");
@@ -1583,11 +1598,33 @@ function createList(form) {
     joinedAt: list.dateCreated
   });
 
-  state.isCreatingList = false;
-  commitChanges([
+  const changes = [
     { entityType: "list", entityId: list.id, field: "_create", value: list },
     { entityType: "collaborator", entityId: collaborator.id, field: "_create", value: collaborator }
-  ], "List created");
+  ];
+
+  if (place) {
+    const item = normalizeListItem({
+      id: listItemId(list.id, place.id),
+      listId: list.id,
+      placeId: place.id,
+      addedByUserId: state.user.id,
+      addedByName: state.user.name,
+      addedAt: new Date().toISOString()
+    });
+    changes.push({
+      entityType: "list_item",
+      entityId: item.id,
+      field: "_create",
+      value: item,
+      listId: list.id
+    });
+  }
+
+  state.isCreatingList = false;
+  state.createListPlaceId = null;
+  state.listChooserPlaceId = null;
+  commitChanges(changes, place ? "Added to new list" : "List created");
 }
 
 function addPlaceToList(listId, placeId) {
@@ -1638,6 +1675,9 @@ function toggleListMembership(listId, placeId) {
 
   const item = getListItem(list.id, place.id, { includeDeleted: true });
   if (item && !item.deleted) {
+    state.isCreatingList = false;
+    state.createListPlaceId = null;
+    state.listChooserPlaceId = null;
     commitChanges([{
       entityType: "list_item",
       entityId: item.id,
@@ -1670,6 +1710,9 @@ function toggleListMembership(listId, placeId) {
       value: nextItem,
       listId: list.id
     });
+    state.isCreatingList = false;
+    state.createListPlaceId = null;
+    state.listChooserPlaceId = null;
     commitChanges(changes, "Added to list");
   }
 }
@@ -2176,10 +2219,13 @@ function bindEvents() {
       if (action.dataset.action === "open-lists") return showLists();
       if (action.dataset.action === "show-create-list") {
         state.isCreatingList = true;
+        state.createListPlaceId = action.dataset.placeId || null;
+        if (state.createListPlaceId) state.listChooserPlaceId = state.createListPlaceId;
         return renderScreen();
       }
       if (action.dataset.action === "cancel-create-list") {
         state.isCreatingList = false;
+        state.createListPlaceId = null;
         return renderScreen();
       }
       if (action.dataset.action === "add-place-to-list") return showPlacePicker(action.dataset.listId);
@@ -2187,7 +2233,12 @@ function bindEvents() {
       if (action.dataset.action === "choose-place-for-list") return addPlaceToList(action.dataset.listId, action.dataset.placeId);
       if (action.dataset.action === "remove-from-list") return removePlaceFromList(action.dataset.listId, action.dataset.placeId);
       if (action.dataset.action === "toggle-list-chooser") {
-        state.listChooserPlaceId = state.listChooserPlaceId === action.dataset.placeId ? null : action.dataset.placeId;
+        const isOpen = state.listChooserPlaceId === action.dataset.placeId;
+        state.listChooserPlaceId = isOpen ? null : action.dataset.placeId;
+        if (isOpen) {
+          state.isCreatingList = false;
+          state.createListPlaceId = null;
+        }
         return renderScreen();
       }
       if (action.dataset.action === "toggle-list-membership") return toggleListMembership(action.dataset.listId, action.dataset.placeId);
